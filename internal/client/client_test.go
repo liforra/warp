@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,6 +236,57 @@ func TestConnectDoesNotRetryMoshOnUnrelatedNonZeroExit(t *testing.T) {
 	}
 	if len(exec.calls) != 1 {
 		t.Fatalf("calls = %d, want 1 (should not have fallen through to ssh)", len(exec.calls))
+	}
+}
+
+// TestConnectPrioritizesLastAttemptedAddressForNextProtocol reproduces the
+// third real-world issue: with ControlMaster configured, ssh's multiplexed
+// connection is keyed by the *literal* address string. If mosh's failed
+// attempt authenticated against addr2, falling through to ssh should retry
+// addr2 first too -- not restart from addr1 -- so a real ControlMaster
+// setup gets a chance to reuse that connection instead of prompting again.
+func TestConnectPrioritizesLastAttemptedAddressForNextProtocol(t *testing.T) {
+	stubDialAlwaysReachable(t)
+	self := selfPath(t)
+	resolver := detect.NewResolver(map[detect.Binary]string{
+		detect.Mosh: self,
+		detect.SSH:  self,
+	})
+
+	host := &config.ResolvedHost{
+		Addresses: []string{"addr1", "addr2"},
+		Protocols: []string{"mosh", "ssh"},
+	}
+
+	exec := &fakeExecutor{
+		codes: []int{255, 10, 0},
+		stderrs: []string{
+			"", // addr1: plain connection failure, keep trying other addresses
+			"/usr/bin/mosh: Did not find mosh server startup message. (Have you installed mosh on your server?)", // addr2: host-level failure, abandon mosh
+		},
+	}
+	conn := &Connector{Resolver: resolver, Exec: exec}
+
+	code, err := conn.Connect(host)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if code != 0 {
+		t.Errorf("code = %d, want 0", code)
+	}
+	if len(exec.calls) != 3 {
+		t.Fatalf("calls = %d, want 3 (mosh@addr1, mosh@addr2, ssh@addr2)", len(exec.calls))
+	}
+
+	sshCall := exec.calls[2]
+	found := false
+	for _, arg := range sshCall {
+		if arg == "addr2" || strings.HasSuffix(arg, "@addr2") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ssh call = %v, want it to target addr2 (mosh's last attempted address), not restart from addr1", sshCall)
 	}
 }
 

@@ -211,8 +211,10 @@ func NewConnector(resolver *detect.Resolver) *Connector {
 }
 
 // Connect tries each protocol in host.Protocols, in order; for each
-// protocol it tries every address in host.Addresses before moving on to the
-// next protocol. Before invoking a protocol's binary at all, it does a TCP
+// protocol it tries every address in host.Addresses (the last address that
+// got far enough to actually attempt a connection is tried first for each
+// subsequent protocol -- see prioritizeAddr) before moving on to the next
+// protocol. Before invoking a protocol's binary at all, it does a TCP
 // reachability preflight on that protocol's port (see preflightPort) and
 // skips straight to the next address/protocol if nothing answers there --
 // this is what actually handles "nothing is listening," generically,
@@ -222,6 +224,17 @@ func NewConnector(resolver *detect.Resolver) *Connector {
 // see connectFailureCode), or a *ConnectFailedErr if nothing connected.
 func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 	var attempts []Attempt
+
+	// preferredAddr is the last address that got far enough to actually
+	// invoke a binary (regardless of outcome). ssh's ControlMaster/
+	// ControlPath keys its multiplexed connection by the *literal* address
+	// string given to it, so falling through to the next protocol against
+	// a *different* address -- even one that reaches the same physical
+	// host -- would never reuse a connection an earlier attempt just
+	// authenticated. Trying preferredAddr first for each subsequent
+	// protocol maximizes the chance ControlMaster (if configured) can
+	// reuse that connection instead of prompting for auth again.
+	var preferredAddr string
 
 	for _, proto := range host.Protocols {
 		bin, ok := protoBinary[proto]
@@ -236,7 +249,7 @@ func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 			continue
 		}
 
-		for _, addr := range host.Addresses {
+		for _, addr := range prioritizeAddr(host.Addresses, preferredAddr) {
 			if port, ok := preflightPort(proto, host); ok {
 				addrPort := net.JoinHostPort(addr, strconv.Itoa(port))
 				conn, dialErr := dial("tcp", addrPort, preflightTimeout)
@@ -253,6 +266,7 @@ func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 			// printed right before invoking regardless, since there's no
 			// way to verify in advance.
 			fmt.Fprintf(os.Stderr, "Connecting with %s (%s)...\n", labelFor(proto), addr)
+			preferredAddr = addr
 
 			argv, err := buildArgv(proto, res.Path, addr, host)
 			if err != nil {
@@ -266,7 +280,21 @@ func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 				continue
 			}
 
-			if code == connectFailureCode || isKnownConnectFailure(proto, stderr) {
+			if isKnownConnectFailure(proto, stderr) {
+				// A known failure marker describes a property of the
+				// remote host itself (e.g. mosh-server isn't installed
+				// there), not of this specific address -- retrying the
+				// other addresses for the same protocol would just repeat
+				// the same failure (and the same auth prompt) pointlessly.
+				// Abandon this protocol entirely and move on to the next.
+				attempts = append(attempts, Attempt{Protocol: proto, Address: addr, ExitCode: code})
+				break
+			}
+
+			if code == connectFailureCode {
+				// A plain transport-level failure, which can legitimately
+				// vary per address (different network path), so still
+				// worth retrying the other addresses for this protocol.
 				attempts = append(attempts, Attempt{Protocol: proto, Address: addr, ExitCode: code})
 				continue
 			}
@@ -276,6 +304,22 @@ func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 	}
 
 	return -1, &ConnectFailedErr{Attempts: attempts}
+}
+
+// prioritizeAddr returns addrs with preferred moved to the front, if it's
+// present at all (preferred == "" or not found just returns addrs as-is).
+func prioritizeAddr(addrs []string, preferred string) []string {
+	if preferred == "" {
+		return addrs
+	}
+	out := make([]string, 0, len(addrs))
+	out = append(out, preferred)
+	for _, a := range addrs {
+		if a != preferred {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func buildArgv(proto, binPath, addr string, host *config.ResolvedHost) ([]string, error) {
