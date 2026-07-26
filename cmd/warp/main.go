@@ -17,6 +17,7 @@ var (
 	protoOverride string
 	scanFlag      bool
 	scanSubnets   []string
+	scanHost      string
 
 	// version and commit are set via -ldflags at release build time
 	// (see .goreleaser.yaml); "dev"/"unknown" are the go build/go run defaults.
@@ -35,6 +36,9 @@ func main() {
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if scanFlag {
+				if scanHost != "" {
+					return runScanHost(scanHost)
+				}
 				return runScan()
 			}
 			if len(args) == 0 {
@@ -50,6 +54,7 @@ func main() {
 	root.Flags().StringVar(&protoOverride, "proto", "", "comma-separated protocol chain override for this invocation, e.g. ssh or mosh,ssh")
 	root.Flags().BoolVar(&scanFlag, "scan", false, "scan for hosts speaking any supported protocol, instead of connecting")
 	root.Flags().StringArrayVar(&scanSubnets, "subnet", nil, "CIDR subnet to scan (repeatable); overrides [scan].subnets and auto-detection when given")
+	root.Flags().StringVar(&scanHost, "host", "", "with --scan, probe just this one host (name, IP, or domain) instead of a subnet")
 
 	connectCmd := &cobra.Command{
 		Use:          "connect <host-or-alias>",

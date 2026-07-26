@@ -7,6 +7,41 @@ import (
 	"github.com/liforra/warp/internal/scan"
 )
 
+// formatMatches renders a Result's confirmed (protocol, port) pairs as
+// "ssh:22, et:2022", falling back to a caveat line for a Tailscale peer
+// where nothing was confirmed (see scan.Result docs on why "tailscale"
+// itself is never a confirmed match).
+func formatMatches(r scan.Result) string {
+	if len(r.Matches) == 0 {
+		if r.Tailscale {
+			return "(none confirmed; tailscale ssh may still work, unverified)"
+		}
+		return "(none)"
+	}
+	parts := make([]string, len(r.Matches))
+	for i, m := range r.Matches {
+		parts[i] = fmt.Sprintf("%s:%d", m.Protocol, m.Port)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// runScanHost implements `warp --scan --host=<name/ip/domain>`: probes just
+// that one host for every supported protocol/port, skipping subnet
+// expansion and Tailscale peer discovery entirely.
+func runScanHost(host string) error {
+	fmt.Printf("scanning host %s\n", host)
+
+	results, err := scan.ScanHost(host)
+	if err != nil {
+		return err
+	}
+
+	for _, r := range results {
+		fmt.Printf("%-15s  %s\n", r.IP, formatMatches(r))
+	}
+	return nil
+}
+
 // runScan implements `warp --scan`. Subnet sources are tried in order --
 // --subnet flags, then [scan].subnets in config, then auto-detection from
 // local network interfaces -- the first non-empty one wins; they are not
@@ -56,10 +91,10 @@ func runScan() error {
 
 	for _, r := range results {
 		origin := ""
-		if r.Tailscale {
+		if r.Tailscale && len(r.Matches) > 0 {
 			origin = "  (tailscale peer)"
 		}
-		fmt.Printf("%-15s  %s%s\n", r.IP, strings.Join(r.Protocols, ", "), origin)
+		fmt.Printf("%-15s  %s%s\n", r.IP, formatMatches(r), origin)
 	}
 	return nil
 }

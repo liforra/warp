@@ -15,19 +15,29 @@ import (
 	"time"
 )
 
-// tcpProbes lists the protocols that have a fixed, meaningfully scannable
-// TCP port. mosh isn't probed separately: it bootstraps over the same ssh
-// port, and there's no static port to test for the mosh-server side without
-// actually authenticating, so an open ssh port is the closest available
-// signal for both. tsh (Teleport) is fronted by a central proxy rather than
-// a per-host port, so it isn't scannable this way either -- neither shows
-// up in Result.Protocols on its own; only tailscale peers (found via
-// tailscale status, not a port probe) are reported outside of this list.
+// tcpProbes lists the (protocol, port) pairs actually dialed. A protocol
+// only ever appears in a Result if one of these answered. ssh is checked on
+// its default port plus 5 commonly-used alternative ports (hardening guides
+// often suggest moving sshd off 22 to cut down on automated scan noise).
+// mosh isn't probed separately: it bootstraps over the same ssh port, and
+// there's no static port to test for the mosh-server side without actually
+// authenticating, so an open ssh port is the closest available signal for
+// both. tsh (Teleport) is fronted by a central proxy rather than a per-host
+// port, so it isn't scannable this way either. tailscale isn't here either,
+// but for a different reason: it's not that there's no port, it's that
+// there's no way to tell "sshd is open" apart from "Tailscale SSH is open"
+// via a bare TCP probe, and Tailscale SSH being enabled is a policy setting
+// we can't observe from outside. See the Result doc comment.
 var tcpProbes = []struct {
 	Protocol string
 	Port     int
 }{
 	{"ssh", 22},
+	{"ssh", 2222},
+	{"ssh", 22222},
+	{"ssh", 2200},
+	{"ssh", 22022},
+	{"ssh", 222},
 	{"et", 2022},
 	{"telnet", 23},
 }
@@ -54,11 +64,29 @@ var tailscaleStatus = func() ([]byte, error) {
 	return exec.Command(path, "status", "--json").Output()
 }
 
-// Result is one IP where at least one protocol answered.
+// Match is one (protocol, port) pair confirmed open on a host.
+type Match struct {
+	Protocol string
+	Port     int
+}
+
+// Result is one IP worth reporting: either a probed protocol answered, or
+// it's a Tailscale peer (reported regardless, since it's a real, known host
+// even if nothing else confirmed it).
+//
+// Matches only ever contains protocol/port pairs actually confirmed by a TCP
+// probe (ssh/et/telnet) -- it does NOT include "tailscale". There's no
+// reliable way to verify Tailscale SSH is enabled on a peer from the
+// outside: it's a per-node ACL/policy setting, not a distinct open port, so
+// a peer with plain sshd running (common) would be indistinguishable from
+// one with Tailscale SSH enabled if we just claimed "tailscale" as a match
+// here. Tailscale is reported as an origin (Result.Tailscale), not a
+// verified capability; whether `tailscale ssh` itself works on a given peer
+// is unverified.
 type Result struct {
 	IP        net.IP
-	Protocols []string // e.g. {"ssh", "et"}; may include "tailscale"
-	Tailscale bool     // true if this IP came from the tailnet peer list
+	Matches   []Match
+	Tailscale bool // true if this IP came from the tailnet peer list
 }
 
 // Options configures a scan run.
@@ -113,9 +141,16 @@ func Run(opts Options) ([]Result, error) {
 		go func() {
 			defer wg.Done()
 			for c := range jobs {
-				if r := probe(c); r != nil {
-					results <- *r
+				matches := matchesFor(c.ip)
+				// A Tailscale peer is worth reporting even with nothing
+				// confirmed -- it's a real, known host, and `tailscale ssh`
+				// may still work even though we can't verify that from here
+				// (see Result docs). A plain-subnet candidate with nothing
+				// open, though, is just noise.
+				if len(matches) == 0 && !c.tailscale {
+					continue
 				}
+				results <- Result{IP: c.ip, Matches: matches, Tailscale: c.tailscale}
 			}
 		}()
 	}
@@ -154,25 +189,65 @@ func addCandidate(m map[string]*candidate, ip net.IP, tailscale bool) {
 	m[key] = &candidate{ip: ip, tailscale: tailscale}
 }
 
-func probe(c *candidate) *Result {
-	var protocols []string
+// matchesFor dials every (protocol, port) pair in tcpProbes against ip and
+// returns the ones that answered.
+func matchesFor(ip net.IP) []Match {
+	var matches []Match
 	for _, p := range tcpProbes {
-		addr := net.JoinHostPort(c.ip.String(), fmt.Sprintf("%d", p.Port))
+		addr := net.JoinHostPort(ip.String(), fmt.Sprintf("%d", p.Port))
 		conn, err := dial("tcp", addr, dialTimeout)
 		if err != nil {
 			continue
 		}
 		conn.Close()
-		protocols = append(protocols, p.Protocol)
+		matches = append(matches, Match{Protocol: p.Protocol, Port: p.Port})
 	}
-	if c.tailscale {
-		protocols = append(protocols, "tailscale")
+	return matches
+}
+
+// ScanHost probes a single host (IP literal or DNS name) for every
+// (protocol, port) pair in tcpProbes, without subnet expansion, size
+// limits, or Tailscale peer discovery -- just "what does this one host
+// answer on." A DNS name resolving to multiple IPv4 addresses is probed and
+// reported once per address. Unlike Run, a host with nothing open is still
+// returned (with an empty Matches) rather than dropped, since an explicit,
+// single-host scan asked about exactly this host.
+func ScanHost(hostOrIP string) ([]Result, error) {
+	ips, err := resolveHost(hostOrIP)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(protocols) == 0 {
-		return nil
+	out := make([]Result, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, Result{IP: ip, Matches: matchesFor(ip)})
 	}
-	return &Result{IP: c.ip, Protocols: protocols, Tailscale: c.tailscale}
+	return out, nil
+}
+
+func resolveHost(hostOrIP string) ([]net.IP, error) {
+	if ip := net.ParseIP(hostOrIP); ip != nil {
+		if ip.To4() == nil {
+			return nil, fmt.Errorf("only IPv4 addresses are supported")
+		}
+		return []net.IP{ip}, nil
+	}
+
+	addrs, err := net.LookupHost(hostOrIP)
+	if err != nil {
+		return nil, fmt.Errorf("resolving %q: %w", hostOrIP, err)
+	}
+
+	var ips []net.IP
+	for _, a := range addrs {
+		if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
+			ips = append(ips, ip)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("%q did not resolve to any IPv4 address", hostOrIP)
+	}
+	return ips, nil
 }
 
 // expandCIDR returns every usable host address in cidr (network and

@@ -6,11 +6,15 @@ import (
 	"time"
 )
 
-// fakeConn is a minimal net.Conn stand-in so probe() can call Close() on it
-// without touching a real socket.
+// fakeConn is a minimal net.Conn stand-in so matchesFor can call Close() on
+// it without touching a real socket.
 type fakeConn struct{ net.Conn }
 
 func (fakeConn) Close() error { return nil }
+
+type errRefused struct{}
+
+func (errRefused) Error() string { return "connection refused" }
 
 func TestExpandCIDRDropsNetworkAndBroadcast(t *testing.T) {
 	ips, err := expandCIDR("192.168.1.0/30")
@@ -40,22 +44,26 @@ func TestExpandCIDRRejectsIPv6(t *testing.T) {
 	}
 }
 
-// fakeDial simulates ssh (port 22) open on 10.0.0.5 and et (port 2022) open
-// on 10.0.0.6; everything else refuses.
+// fakeDial simulates: ssh(22) open on 10.0.0.5; et(2022) open on 10.0.0.6;
+// ssh(2222), an alternate port, open on 10.0.0.7 (nothing on 22); ssh(22)
+// open on the tailscale peer 10.0.0.9; nothing open anywhere else.
 func fakeDial(network, addr string, timeout time.Duration) (net.Conn, error) {
 	switch addr {
-	case "10.0.0.5:22", "10.0.0.9:22":
-		return fakeConn{}, nil
-	case "10.0.0.6:2022":
+	case "10.0.0.5:22", "10.0.0.6:2022", "10.0.0.7:2222", "10.0.0.9:22":
 		return fakeConn{}, nil
 	default:
 		return nil, &net.OpError{Op: "dial", Err: errRefused{}}
 	}
 }
 
-type errRefused struct{}
-
-func (errRefused) Error() string { return "connection refused" }
+func hasMatch(matches []Match, protocol string, port int) bool {
+	for _, m := range matches {
+		if m.Protocol == protocol && m.Port == port {
+			return true
+		}
+	}
+	return false
+}
 
 func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 	origDial := dial
@@ -65,7 +73,8 @@ func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 		return []byte(`{
 			"Peer": {
 				"node1": {"TailscaleIPs": ["10.0.0.9"], "Online": true},
-				"node2": {"TailscaleIPs": ["10.0.0.99"], "Online": false}
+				"node2": {"TailscaleIPs": ["10.0.0.99"], "Online": false},
+				"node3": {"TailscaleIPs": ["10.0.0.50"], "Online": true}
 			}
 		}`), nil
 	}
@@ -74,7 +83,7 @@ func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 		tailscaleStatus = origStatus
 	}()
 
-	results, err := Run(Options{Subnets: []string{"10.0.0.0/29"}})
+	results, err := Run(Options{Subnets: []string{"10.0.0.0/28"}})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -85,16 +94,18 @@ func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 	}
 
 	ssh, ok := byIP["10.0.0.5"]
-	if !ok {
-		t.Fatalf("expected a result for 10.0.0.5, got %+v", results)
-	}
-	if len(ssh.Protocols) != 1 || ssh.Protocols[0] != "ssh" {
-		t.Errorf("10.0.0.5 protocols = %v, want [ssh]", ssh.Protocols)
+	if !ok || len(ssh.Matches) != 1 || !hasMatch(ssh.Matches, "ssh", 22) {
+		t.Errorf("10.0.0.5 matches = %+v, want [{ssh 22}]", ssh.Matches)
 	}
 
 	et, ok := byIP["10.0.0.6"]
-	if !ok || len(et.Protocols) != 1 || et.Protocols[0] != "et" {
-		t.Errorf("10.0.0.6 result = %+v, want protocols [et]", et)
+	if !ok || len(et.Matches) != 1 || !hasMatch(et.Matches, "et", 2022) {
+		t.Errorf("10.0.0.6 matches = %+v, want [{et 2022}]", et.Matches)
+	}
+
+	altSSH, ok := byIP["10.0.0.7"]
+	if !ok || len(altSSH.Matches) != 1 || !hasMatch(altSSH.Matches, "ssh", 2222) {
+		t.Errorf("10.0.0.7 matches = %+v, want [{ssh 2222}] (alt ssh port)", altSSH.Matches)
 	}
 
 	peer, ok := byIP["10.0.0.9"]
@@ -104,26 +115,72 @@ func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 	if !peer.Tailscale {
 		t.Errorf("10.0.0.9 Tailscale = false, want true")
 	}
-	found := false
-	for _, p := range peer.Protocols {
-		if p == "ssh" {
-			found = true
-		}
+	if !hasMatch(peer.Matches, "ssh", 22) {
+		t.Errorf("10.0.0.9 matches = %+v, want to include {ssh 22}", peer.Matches)
 	}
-	if !found {
-		t.Errorf("10.0.0.9 protocols = %v, want to include ssh", peer.Protocols)
+
+	quietPeer, ok := byIP["10.0.0.50"]
+	if !ok {
+		t.Fatalf("expected tailscale peer 10.0.0.50 in results even with nothing open, got %+v", results)
+	}
+	if !quietPeer.Tailscale || len(quietPeer.Matches) != 0 {
+		t.Errorf("10.0.0.50 = %+v, want Tailscale=true, Matches=empty", quietPeer)
 	}
 
 	if _, ok := byIP["10.0.0.99"]; ok {
 		t.Error("offline peer 10.0.0.99 should not appear in results")
 	}
 	if _, ok := byIP["10.0.0.1"]; ok {
-		t.Error("10.0.0.1 (nothing open) should not appear in results")
+		t.Error("10.0.0.1 (plain subnet IP, nothing open) should not appear in results")
 	}
 }
 
 func TestAutoDetectSubnetsDoesNotError(t *testing.T) {
 	if _, err := AutoDetectSubnets(); err != nil {
 		t.Fatalf("AutoDetectSubnets: %v", err)
+	}
+}
+
+func TestScanHostReportsPortsForIPLiteral(t *testing.T) {
+	origDial := dial
+	dial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		if addr == "203.0.113.5:22" {
+			return fakeConn{}, nil
+		}
+		return nil, &net.OpError{Op: "dial", Err: errRefused{}}
+	}
+	defer func() { dial = origDial }()
+
+	results, err := ScanHost("203.0.113.5")
+	if err != nil {
+		t.Fatalf("ScanHost: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1: %+v", len(results), results)
+	}
+	if !hasMatch(results[0].Matches, "ssh", 22) {
+		t.Errorf("matches = %+v, want to include {ssh 22}", results[0].Matches)
+	}
+}
+
+func TestScanHostReportsEmptyMatchesRatherThanDropping(t *testing.T) {
+	origDial := dial
+	dial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Err: errRefused{}}
+	}
+	defer func() { dial = origDial }()
+
+	results, err := ScanHost("203.0.113.9")
+	if err != nil {
+		t.Fatalf("ScanHost: %v", err)
+	}
+	if len(results) != 1 || len(results[0].Matches) != 0 {
+		t.Fatalf("results = %+v, want one result with empty Matches", results)
+	}
+}
+
+func TestScanHostRejectsIPv6(t *testing.T) {
+	if _, err := ScanHost("2001:db8::1"); err == nil {
+		t.Fatal("expected error for IPv6 literal, got nil")
 	}
 }
