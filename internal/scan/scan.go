@@ -62,13 +62,19 @@ const (
 var dial = net.DialTimeout
 
 // tailscaleStatus is overridden in tests to avoid depending on a real
-// tailscale installation.
-var tailscaleStatus = func() ([]byte, error) {
+// tailscale installation. socket is passed as --socket when non-empty, for
+// machines where tailscaled listens on a non-default control socket.
+var tailscaleStatus = func(socket string) ([]byte, error) {
 	path, err := exec.LookPath("tailscale")
 	if err != nil {
 		return nil, err
 	}
-	return exec.Command(path, "status", "--json").Output()
+	args := []string{}
+	if socket != "" {
+		args = append(args, "--socket="+socket)
+	}
+	args = append(args, "status", "--json")
+	return exec.Command(path, args...).Output()
 }
 
 // lookupHost is overridden in tests to avoid depending on real DNS.
@@ -124,6 +130,10 @@ type Options struct {
 	Subnets []string
 	// Workers caps scan concurrency; <= 0 uses a sane default.
 	Workers int
+	// TailscaleSocket is passed to `tailscale status --json` as --socket
+	// when non-empty, for machines where tailscaled isn't on the default
+	// control socket.
+	TailscaleSocket string
 }
 
 type candidate struct {
@@ -154,7 +164,7 @@ func Run(opts Options) ([]Result, error) {
 		}
 	}
 
-	if peers, err := tailscalePeers(); err == nil {
+	if peers, err := tailscalePeers(opts.TailscaleSocket); err == nil {
 		for _, p := range peers {
 			addCandidate(candidates, p.IP, true, p.Hostname)
 		}
@@ -249,7 +259,7 @@ func matchesFor(ip net.IP) []Match {
 // Unlike Run, a host with nothing open is still returned (with an empty
 // Matches) rather than dropped, since an explicit, single-host scan asked
 // about exactly this host.
-func ScanHost(hostOrIP string) ([]Result, error) {
+func ScanHost(hostOrIP string, tailscaleSocket string) ([]Result, error) {
 	ips, queriedName, err := resolveHost(hostOrIP)
 	if err != nil {
 		return nil, err
@@ -259,7 +269,7 @@ func ScanHost(hostOrIP string) ([]Result, error) {
 	// tailnet hostname is usually more useful than a CGNAT address's
 	// (nonexistent) public PTR record. A lookup failure (tailscale not
 	// installed/logged in) just means an empty map, not an error here.
-	tsHostnames := tailscaleHostnameByIP()
+	tsHostnames := tailscaleHostnameByIP(tailscaleSocket)
 
 	out := make([]Result, 0, len(ips))
 	for _, ip := range ips {
@@ -281,8 +291,8 @@ func ScanHost(hostOrIP string) ([]Result, error) {
 // tailscaleHostnameByIP returns a best-effort {IP: hostname} map built from
 // the local tailscale client's peer list. A failure (not installed, not
 // logged in) just yields an empty map, not an error.
-func tailscaleHostnameByIP() map[string]string {
-	peers, err := tailscalePeers()
+func tailscaleHostnameByIP(socket string) map[string]string {
+	peers, err := tailscalePeers(socket)
 	if err != nil {
 		return nil
 	}
@@ -425,8 +435,8 @@ type tailscalePeer struct {
 // need a separate reverse DNS lookup for these). Returning an error just
 // means tailscale isn't installed, isn't logged in, or isn't running --
 // callers should treat that as "no peers to add," not a scan failure.
-func tailscalePeers() ([]tailscalePeer, error) {
-	out, err := tailscaleStatus()
+func tailscalePeers(socket string) ([]tailscalePeer, error) {
+	out, err := tailscaleStatus(socket)
 	if err != nil {
 		return nil, err
 	}

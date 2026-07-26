@@ -5,9 +5,14 @@ import "github.com/liforra/warp/internal/config"
 // buildTailscaleArgv maps merged tailscale options + a chosen address to a
 // `tailscale ssh` argv. Tailscale SSH authenticates via the tailnet
 // identity, not a key or port, so there's little to map beyond the
-// username and the escape hatch.
+// username and the escape hatch. --socket is a global flag on the
+// tailscale binary, so it must come before the ssh subcommand.
 func buildTailscaleArgv(binPath, addr string, opts config.TailscaleOptions) []string {
-	argv := []string{binPath, "ssh"}
+	argv := []string{binPath}
+	if opts.Socket != "" {
+		argv = append(argv, "--socket="+opts.Socket)
+	}
+	argv = append(argv, "ssh")
 	argv = append(argv, opts.ExtraArgs...)
 	argv = append(argv, target(opts.User, addr))
 	return argv

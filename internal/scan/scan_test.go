@@ -82,7 +82,7 @@ func stubReverseLookup(t *testing.T, known map[string]string) {
 func stubTailscaleUnavailable(t *testing.T) {
 	t.Helper()
 	orig := tailscaleStatus
-	tailscaleStatus = func() ([]byte, error) { return nil, fmt.Errorf("tailscale not available in test") }
+	tailscaleStatus = func(socket string) ([]byte, error) { return nil, fmt.Errorf("tailscale not available in test") }
 	t.Cleanup(func() { tailscaleStatus = orig })
 }
 
@@ -90,7 +90,7 @@ func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 	origDial := dial
 	origStatus := tailscaleStatus
 	dial = fakeDial
-	tailscaleStatus = func() ([]byte, error) {
+	tailscaleStatus = func(socket string) ([]byte, error) {
 		return []byte(`{
 			"Peer": {
 				"node1": {"TailscaleIPs": ["10.0.0.9"], "Online": true, "DNSName": "peer9.tailnet-abc.ts.net."},
@@ -184,7 +184,7 @@ func TestScanHostReportsPortsForIPLiteral(t *testing.T) {
 	stubTailscaleUnavailable(t)
 	defer func() { dial = origDial }()
 
-	results, err := ScanHost("203.0.113.5")
+	results, err := ScanHost("203.0.113.5", "")
 	if err != nil {
 		t.Fatalf("ScanHost: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestScanHostUsesQueriedNameNotReverseDNS(t *testing.T) {
 		lookupHost = origLookup
 	}()
 
-	results, err := ScanHost("myhost.example.com")
+	results, err := ScanHost("myhost.example.com", "")
 	if err != nil {
 		t.Fatalf("ScanHost: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestScanHostPrefersTailscaleHostnameOverReverseDNS(t *testing.T) {
 		}
 		return nil, &net.OpError{Op: "dial", Err: errRefused{}}
 	}
-	tailscaleStatus = func() ([]byte, error) {
+	tailscaleStatus = func(socket string) ([]byte, error) {
 		return []byte(`{
 			"Peer": {
 				"node1": {"TailscaleIPs": ["100.64.0.5"], "Online": true, "DNSName": "mybox.tailnet-abc.ts.net."}
@@ -257,7 +257,7 @@ func TestScanHostPrefersTailscaleHostnameOverReverseDNS(t *testing.T) {
 		tailscaleStatus = origStatus
 	}()
 
-	results, err := ScanHost("100.64.0.5")
+	results, err := ScanHost("100.64.0.5", "")
 	if err != nil {
 		t.Fatalf("ScanHost: %v", err)
 	}
@@ -275,7 +275,7 @@ func TestScanHostReportsEmptyMatchesRatherThanDropping(t *testing.T) {
 	stubTailscaleUnavailable(t)
 	defer func() { dial = origDial }()
 
-	results, err := ScanHost("203.0.113.9")
+	results, err := ScanHost("203.0.113.9", "")
 	if err != nil {
 		t.Fatalf("ScanHost: %v", err)
 	}
@@ -285,7 +285,39 @@ func TestScanHostReportsEmptyMatchesRatherThanDropping(t *testing.T) {
 }
 
 func TestScanHostRejectsIPv6(t *testing.T) {
-	if _, err := ScanHost("2001:db8::1"); err == nil {
+	if _, err := ScanHost("2001:db8::1", ""); err == nil {
 		t.Fatal("expected error for IPv6 literal, got nil")
+	}
+}
+
+func TestTailscaleSocketIsForwarded(t *testing.T) {
+	origStatus := tailscaleStatus
+	origDial := dial
+	var gotSocket string
+	tailscaleStatus = func(socket string) ([]byte, error) {
+		gotSocket = socket
+		return nil, fmt.Errorf("no tailscale in test, just checking the socket arg")
+	}
+	dial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Err: errRefused{}}
+	}
+	defer func() {
+		tailscaleStatus = origStatus
+		dial = origDial
+	}()
+
+	if _, err := ScanHost("203.0.113.50", "/custom/tailscaled.sock"); err != nil {
+		t.Fatalf("ScanHost: %v", err)
+	}
+	if gotSocket != "/custom/tailscaled.sock" {
+		t.Errorf("tailscaleStatus called with socket %q, want %q", gotSocket, "/custom/tailscaled.sock")
+	}
+
+	gotSocket = ""
+	if _, err := Run(Options{Subnets: []string{"203.0.113.48/29"}, TailscaleSocket: "/another.sock"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if gotSocket != "/another.sock" {
+		t.Errorf("Run: tailscaleStatus called with socket %q, want %q", gotSocket, "/another.sock")
 	}
 }

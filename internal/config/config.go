@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 
+	"github.com/liforra/warp/internal/netrc"
+	"github.com/liforra/warp/internal/sshconfig"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -99,6 +103,11 @@ type ETOptions struct {
 // the username.
 type TailscaleOptions struct {
 	Options
+	// Socket is the tailscaled control socket to talk to, for machines
+	// where it's not the default (e.g. a non-standard install, a
+	// container, or multiple tailscaled instances). Falls back to
+	// Config.Tailscale.Socket when unset; passed as `tailscale --socket=`.
+	Socket    string   `toml:"socket"`
 	ExtraArgs []string `toml:"extra_args"`
 }
 
@@ -117,6 +126,12 @@ type TshOptions struct {
 type TelnetOptions struct {
 	Options
 	ExtraArgs []string `toml:"extra_args"`
+
+	// NetrcAutologin is set by applySources (not user-configurable) when
+	// this host's address matched a ~/.netrc machine entry. It signals
+	// the telnet client to use its own -a autologin (which reads .netrc
+	// itself at connection time) -- warp never reads the password.
+	NetrcAutologin bool `toml:"-"`
 }
 
 // HostConfig is one [host.X] table.
@@ -183,12 +198,66 @@ func (s *ScanConfig) normalize() error {
 	return nil
 }
 
+// SourceOption configures one auto-sourced external config file (an
+// ssh_config-style file, or a .netrc): whether to source it at all, and
+// which path(s) to read. Both default to enabled, reading their tool's
+// standard location, if the section is omitted entirely.
+type SourceOption struct {
+	EnabledOpt *bool `toml:"enabled"`
+	RawPaths   any   `toml:"paths"`
+
+	// Paths is populated from RawPaths by normalize() after unmarshaling.
+	Paths []string `toml:"-"`
+}
+
+func (s *SourceOption) enabled() bool {
+	return s.EnabledOpt == nil || *s.EnabledOpt
+}
+
+func (s *SourceOption) normalize(field string) error {
+	paths, err := toStringSlice(s.RawPaths, field)
+	if err != nil {
+		return err
+	}
+	s.Paths = paths
+	return nil
+}
+
+// SourcesConfig configures auto-importing hosts and credentials from
+// external config files that ssh/mosh/et/telnet already understand, so
+// entries don't need to be duplicated into warp.toml. A host name (or
+// alias) already present under [host.*] always wins outright over anything
+// sourced -- sourced hosts are strictly lower priority, never merged in.
+type SourcesConfig struct {
+	// SSHConfig sources ~/.ssh/config (default) as additional warp hosts:
+	// each literal (non-wildcard) Host block becomes a host with that
+	// block's HostName/User/Port/IdentityFile/ProxyJump. mosh and et both
+	// benefit from this too -- mosh bootstraps over ssh, and et parses
+	// ssh_config itself for the same fields.
+	SSHConfig SourceOption `toml:"ssh_config"`
+	// Netrc sources ~/.netrc (default) to enable telnet's own -a autologin
+	// for hosts with a matching machine entry, and to fill in a host's
+	// telnet username from its login field when not already set. The
+	// password itself is never read by warp (see internal/netrc).
+	Netrc SourceOption `toml:"netrc"`
+}
+
+// TailscaleConfig is the top-level [tailscale] table: machine-wide
+// defaults for `tailscale ssh`, e.g. when tailscaled listens on a
+// non-default control socket. Host.<name>.tailscale.socket overrides this
+// per host.
+type TailscaleConfig struct {
+	Socket string `toml:"socket"`
+}
+
 // Config is the root of ~/.config/warp/config.toml.
 type Config struct {
-	Binaries map[string]string      `toml:"binaries"`
-	Defaults Options                `toml:"defaults"`
-	Hosts    map[string]*HostConfig `toml:"host"`
-	Scan     ScanConfig             `toml:"scan"`
+	Binaries  map[string]string      `toml:"binaries"`
+	Defaults  Options                `toml:"defaults"`
+	Hosts     map[string]*HostConfig `toml:"host"`
+	Scan      ScanConfig             `toml:"scan"`
+	Sources   SourcesConfig          `toml:"sources"`
+	Tailscale TailscaleConfig        `toml:"tailscale"`
 
 	// index maps every host key and alias to its canonical host key.
 	// Built by buildIndex after unmarshaling; not part of the TOML itself.
@@ -230,10 +299,162 @@ func Parse(data []byte) (*Config, error) {
 	if err := cfg.Scan.normalize(); err != nil {
 		return nil, err
 	}
+	if err := cfg.Sources.SSHConfig.normalize("sources.ssh_config.paths"); err != nil {
+		return nil, err
+	}
+	if err := cfg.Sources.Netrc.normalize("sources.netrc.paths"); err != nil {
+		return nil, err
+	}
 	if err := cfg.buildIndex(); err != nil {
 		return nil, err
 	}
+	if err := cfg.applySources(); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// applySources auto-imports hosts from ~/.ssh/config (or configured paths)
+// as lower-priority warp hosts, then enriches telnet options from ~/.netrc.
+// Both are best-effort: a missing default file is expected and not an
+// error; only real read/parse failures on an explicitly configured path
+// are surfaced.
+func (c *Config) applySources() error {
+	if c.Hosts == nil {
+		c.Hosts = make(map[string]*HostConfig)
+	}
+
+	if c.Sources.SSHConfig.enabled() {
+		paths := c.Sources.SSHConfig.Paths
+		usingDefault := len(paths) == 0
+		if usingDefault {
+			paths = []string{"~/.ssh/config"}
+		}
+		for _, p := range paths {
+			if err := c.importSSHConfig(p, usingDefault); err != nil {
+				return fmt.Errorf("sources.ssh_config %q: %w", p, err)
+			}
+		}
+	}
+
+	if c.Sources.Netrc.enabled() {
+		paths := c.Sources.Netrc.Paths
+		usingDefault := len(paths) == 0
+		if usingDefault {
+			paths = defaultNetrcPaths()
+		}
+		for _, p := range paths {
+			if err := c.applyNetrc(p, usingDefault); err != nil {
+				return fmt.Errorf("sources.netrc %q: %w", p, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// importSSHConfig adds one host per literal Host block in the ssh_config
+// file at path, skipping any name that collides with an existing host or
+// alias (explicit config always wins) or that was already imported from an
+// earlier source path. missingOK suppresses a not-found error for the
+// default path, which usually just doesn't exist.
+func (c *Config) importSSHConfig(path string, missingOK bool) error {
+	abs, err := expandUserPath(path)
+	if err != nil {
+		return err
+	}
+
+	hosts, err := sshconfig.Parse(abs)
+	if err != nil {
+		if missingOK && os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, sh := range hosts {
+		if _, exists := c.index[sh.Name]; exists {
+			continue
+		}
+
+		hc := &HostConfig{
+			Addresses: []string{firstNonEmpty(sh.HostName, sh.Name)},
+		}
+		hc.Options.User = sh.User
+		hc.Options.Port = sh.Port
+		hc.Options.IdentityFile = sh.IdentityFile
+		if sh.ProxyJump != "" {
+			hc.SSH.ProxyJump = sh.ProxyJump
+		}
+
+		c.Hosts[sh.Name] = hc
+		c.index[sh.Name] = sh.Name
+	}
+	return nil
+}
+
+// applyNetrc marks NetrcAutologin (and fills in an unset telnet username)
+// for any host whose first address matches a .netrc machine entry.
+// missingOK suppresses a not-found error for the default path.
+func (c *Config) applyNetrc(path string, missingOK bool) error {
+	abs, err := expandUserPath(path)
+	if err != nil {
+		return err
+	}
+
+	entries, err := netrc.Parse(abs)
+	if err != nil {
+		if missingOK && os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, h := range c.Hosts {
+		if len(h.Addresses) == 0 {
+			continue
+		}
+		entry, ok := entries[h.Addresses[0]]
+		if !ok {
+			continue
+		}
+		h.Telnet.NetrcAutologin = true
+		if h.Telnet.Options.User == "" {
+			h.Telnet.Options.User = entry.Login
+		}
+	}
+	return nil
+}
+
+func defaultNetrcPaths() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"~/_netrc", "~/.netrc"}
+	}
+	return []string{"~/.netrc"}
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// userHomeDir is overridden in tests so default source paths (~/.ssh/config,
+// ~/.netrc) resolve inside an isolated temp directory instead of the actual
+// machine's real dotfiles -- otherwise test behavior would depend on
+// whatever happens to be in the developer's or CI runner's home directory.
+var userHomeDir = os.UserHomeDir
+
+func expandUserPath(path string) (string, error) {
+	if !strings.HasPrefix(path, "~") {
+		return path, nil
+	}
+	home, err := userHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory: %w", err)
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~")), nil
 }
 
 func (c *Config) buildIndex() error {
@@ -306,6 +527,9 @@ func (c *Config) Resolve(nameOrAlias string) (*ResolvedHost, error) {
 
 	tailscale := h.Tailscale
 	tailscale.Options = mergeOptions(base, h.Tailscale.Options)
+	if tailscale.Socket == "" {
+		tailscale.Socket = c.Tailscale.Socket
+	}
 
 	tsh := h.Tsh
 	tsh.Options = mergeOptions(base, h.Tsh.Options)

@@ -7,10 +7,19 @@ import (
 )
 
 // buildTelnetArgv maps merged telnet options + a chosen address to a telnet
-// argv. telnet has no login step of its own at the connection level (auth
-// happens inside the session, if at all), so User isn't applied here.
+// argv. -l sets the login name most telnet implementations understand;
+// -a triggers the client's own .netrc-based autologin (which reads the
+// file itself at connection time) when applySources found a matching
+// machine entry -- warp never reads or passes a password itself.
 func buildTelnetArgv(binPath, addr string, opts config.TelnetOptions) []string {
 	argv := []string{binPath}
+
+	if opts.User != "" {
+		argv = append(argv, "-l", opts.User)
+	}
+	if opts.NetrcAutologin {
+		argv = append(argv, "-a")
+	}
 	argv = append(argv, opts.ExtraArgs...)
 
 	if opts.Port != 0 {

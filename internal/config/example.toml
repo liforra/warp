@@ -56,6 +56,9 @@ addresses = "noproto.example.com"
 addresses = "tailnet-box"              # tailscale hosts are addressed by name
 protocol = "tailscale"
 
+[host.tailnet-box.tailscale]
+# socket = "/custom/tailscaled.sock"   # per-host override; see [tailscale] below for the usual case
+
 [host.teleport-box]
 addresses = "teleport-box.example.com"
 protocol = "tsh"
@@ -78,3 +81,30 @@ port = 23
 [scan]
 subnets = ["192.168.1.0/24"]
 # workers = 256                        # optional; concurrency cap, default 256
+
+# Machine-wide default for `tailscale ssh`/`tailscale status`, e.g. when
+# tailscaled listens on a non-default control socket (custom install,
+# container, multiple tailscaled instances). Overridden per host via
+# [host.X.tailscale] socket, as shown above for tailnet-box.
+[tailscale]
+# socket = "/var/run/tailscale/tailscaled.sock"
+
+# Auto-import hosts/credentials from config files ssh/mosh/et/telnet
+# already understand, so you don't have to duplicate entries that already
+# exist there. Both default to *enabled*, reading the paths shown below,
+# even with no [sources] section at all -- an explicit [host.X] here
+# always wins outright over anything sourced; sourced hosts are strictly
+# lower priority, never merged field-by-field.
+[sources.ssh_config]
+# enabled = true                       # set false to disable entirely
+# paths = ["~/.ssh/config"]            # default; mosh (bootstraps over ssh)
+                                        # and et (parses ssh_config itself)
+                                        # both benefit from this too
+
+[sources.netrc]
+# enabled = true                       # set false to disable entirely
+# paths = ["~/.netrc"]                 # default
+# Enables telnet's own -a autologin for a host whose address matches a
+# ~/.netrc machine entry, and fills in [host.X.telnet] user from its login
+# field if not already set. warp itself never reads the password -- telnet
+# re-reads ~/.netrc on its own when given -a.

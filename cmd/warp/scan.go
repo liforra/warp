@@ -40,7 +40,13 @@ func formatHostname(r scan.Result) string {
 func runScanHost(host string) error {
 	fmt.Printf("scanning host %s\n", host)
 
-	results, err := scan.ScanHost(host)
+	cfg, cfgErr := loadConfig()
+	socket := ""
+	if cfgErr == nil {
+		socket = cfg.Tailscale.Socket
+	}
+
+	results, err := scan.ScanHost(host, socket)
 	if err != nil {
 		return err
 	}
@@ -82,13 +88,15 @@ func runScan() error {
 	}
 
 	workers := 0
+	socket := ""
 	if err == nil {
 		workers = cfg.Scan.Workers
+		socket = cfg.Tailscale.Socket
 	}
 
 	fmt.Printf("scanning %d subnet(s) (%s): %s\n", len(subnets), source, strings.Join(subnets, ", "))
 
-	results, scanErr := scan.Run(scan.Options{Subnets: subnets, Workers: workers})
+	results, scanErr := scan.Run(scan.Options{Subnets: subnets, Workers: workers, TailscaleSocket: socket})
 	if scanErr != nil {
 		return scanErr
 	}
