@@ -46,7 +46,7 @@ nfpms:
     maintainer: "liforra <claude@liforra.de>"
     homepage: "https://github.com/liforra/warp"
     description: "Unified ssh/mosh/et launcher driven by a single TOML config"
-    license: "MIT"
+    license: "AGPL-3.0"
     formats:
       - deb
       - rpm
@@ -61,10 +61,14 @@ release:
     owner: liforra
     name: warp
   # Version numbers are v<VERSION file contents>-<short commit sha> (see
-  # .github/workflows/release.yml), so every release is a prerelease-style
-  # build rather than a curated semver bump; mark every GitHub Release
-  # accordingly until a real tagging policy is introduced.
-  prerelease: auto
+  # .github/workflows/release.yml) rather than a curated semver bump, but
+  # each one is still meant to be a normal, usable release -- NOT
+  # experimental/unstable. This matters beyond labeling: GitHub's
+  # /releases/latest API endpoint (which install.sh/install.ps1 both use)
+  # explicitly excludes prereleases, and `prerelease: auto` would mark
+  # every single release as one, since the version always contains a
+  # "-<sha>" suffix. That would permanently 404 the install scripts.
+  prerelease: false
 
 changelog:
   disable: true
@@ -83,7 +87,7 @@ changelog:
 #     directory: Formula
 #     homepage: "https://github.com/liforra/warp"
 #     description: "Unified ssh/mosh/et launcher driven by a single TOML config"
-#     license: "MIT"
+#     license: "AGPL-3.0"
 #
 # scoops:
 #   - name: warp
@@ -94,4 +98,4 @@ changelog:
 #       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
 #     homepage: "https://github.com/liforra/warp"
 #     description: "Unified ssh/mosh/et launcher driven by a single TOML config"
-#     license: "MIT"
+#     license: "AGPL-3.0"
