@@ -1,0 +1,40 @@
+# Example warp config. Copy to ~/.config/warp/config.toml (or run `warp init`)
+# and edit to match your hosts.
+
+[binaries]                     # optional; omit an entry to resolve it via $PATH
+ssh = "/usr/bin/ssh"
+mosh = "/usr/bin/mosh"
+et   = "/usr/local/bin/et"
+
+[defaults]                     # shared by all protocols unless overridden below
+user = "alice"
+identity_file = "~/.ssh/id_ed25519"
+port = 22
+compression = true
+
+[host.myserver]
+addresses = ["myserver.example.com", "10.0.0.5", "192.168.1.5"]  # tried in order
+aliases = ["ms", "myserver-prod"]      # `warp connect ms` also resolves here
+protocol = ["mosh", "ssh"]             # try mosh first, fall back to ssh
+user = "bob"                           # overrides [defaults] for this host, all protocols
+
+[host.myserver.ssh]                    # ssh-only overrides for this host
+port_forwarding = ["8080:localhost:80"]
+proxy_jump = "bastion"
+control_master = true
+# extra_args = ["-o", "SomeFutureOption=yes"]   # escape hatch for anything not modeled
+
+[host.myserver.mosh]
+predict = "adaptive"
+udp_port_range = "60000:61000"
+ssh_port = 2222
+
+[host.sshonly]
+addresses = "sshonly.example.com"      # bare string is fine when there's only one
+protocol = "ssh"                       # explicit single protocol, no fallback
+
+[host.sshonly.et]                      # not used unless protocol includes "et"
+port = 2022
+jumphost = "bastion.example.com"
+ssh_forwarding = false
+keepalive = true
