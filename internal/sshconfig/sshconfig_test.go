@@ -63,6 +63,26 @@ Host real-host
 	}
 }
 
+func TestParseStripsInlineComment(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config", `
+Host alhena
+  HostName alhena.example.com
+  IdentityFile ~/.ssh/private/mainkey #    X11Forwarding yes
+`)
+
+	hosts, err := Parse(path)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(hosts) != 1 {
+		t.Fatalf("got %d hosts, want 1: %+v", len(hosts), hosts)
+	}
+	if hosts[0].IdentityFile != "~/.ssh/private/mainkey" {
+		t.Errorf("IdentityFile = %q, want %q (inline comment stripped)", hosts[0].IdentityFile, "~/.ssh/private/mainkey")
+	}
+}
+
 func TestParseEqualsSyntax(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "config", `

@@ -153,8 +153,9 @@ func isWildcardPattern(s string) bool {
 }
 
 // splitConfigLine splits an ssh_config line into its key and value.
-// ssh_config accepts "Key value", "Key=value", and quoted values; this
-// handles the common forms without being a full tokenizer.
+// ssh_config accepts "Key value", "Key=value", quoted values, and a
+// trailing "# ..." comment after the value on the same line; this handles
+// the common forms without being a full tokenizer.
 func splitConfigLine(line string) (key, val string, ok bool) {
 	line = strings.TrimSpace(strings.Replace(line, "=", " ", 1))
 	i := strings.IndexAny(line, " \t")
@@ -163,11 +164,30 @@ func splitConfigLine(line string) (key, val string, ok bool) {
 	}
 	key = line[:i]
 	val = strings.TrimSpace(line[i+1:])
+	val = stripInlineComment(val)
 	val = strings.Trim(val, `"`)
 	if key == "" || val == "" {
 		return "", "", false
 	}
 	return key, val, true
+}
+
+// stripInlineComment truncates val at the first '#' that isn't inside a
+// quoted section, so e.g. `IdentityFile ~/.ssh/key # for host X` doesn't
+// end up with the comment glued onto the path.
+func stripInlineComment(val string) string {
+	inQuotes := false
+	for i, r := range val {
+		switch r {
+		case '"':
+			inQuotes = !inQuotes
+		case '#':
+			if !inQuotes {
+				return strings.TrimSpace(val[:i])
+			}
+		}
+	}
+	return val
 }
 
 func expandPath(path string) (string, error) {

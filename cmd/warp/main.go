@@ -18,6 +18,8 @@ var (
 	scanFlag      bool
 	scanSubnets   []string
 	scanHost      string
+	convertFlag   bool
+	outputPath    string
 
 	// version and commit are set via -ldflags at release build time
 	// (see .goreleaser.yaml); "dev"/"unknown" are the go build/go run defaults.
@@ -35,6 +37,9 @@ func main() {
 		// matching subcommands first.
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if convertFlag {
+				return runConvert()
+			}
 			if scanFlag {
 				if scanHost != "" {
 					return runScanHost(scanHost)
@@ -50,11 +55,13 @@ func main() {
 		// don't dump a usage blob after it.
 		SilenceUsage: true,
 	}
-	root.PersistentFlags().StringVar(&configPath, "config", "", "path to config.toml (default: ~/.config/warp/config.toml)")
+	root.PersistentFlags().StringVar(&configPath, "config", "", "path to config.toml (default: ~/.config/warp/config.toml); with --convert, the ssh_config-style file to convert FROM instead (default: ~/.ssh/config)")
 	root.Flags().StringVar(&protoOverride, "proto", "", "comma-separated protocol chain override for this invocation, e.g. ssh or mosh,ssh")
 	root.Flags().BoolVar(&scanFlag, "scan", false, "scan for hosts speaking any supported protocol, instead of connecting")
 	root.Flags().StringArrayVar(&scanSubnets, "subnet", nil, "CIDR subnet to scan (repeatable); overrides [scan].subnets and auto-detection when given")
 	root.Flags().StringVar(&scanHost, "host", "", "with --scan, probe just this one host (name, IP, or domain) instead of a subnet")
+	root.Flags().BoolVar(&convertFlag, "convert", false, "convert an ssh_config-style file into warp.toml [host] blocks, instead of connecting")
+	root.Flags().StringVar(&outputPath, "output", "", "with --convert, destination path for the generated warp.toml (default: stdout)")
 
 	connectCmd := &cobra.Command{
 		Use:          "connect <host-or-alias>",
