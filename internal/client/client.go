@@ -1,5 +1,5 @@
 // Package client drives the protocol x address fallback loop that connects
-// to a host using ssh, mosh, et, tailscale ssh, or tsh.
+// to a host using ssh, mosh, et, tailscale ssh, tsh, or telnet.
 package client
 
 import (
@@ -35,6 +35,7 @@ var protoBinary = map[string]detect.Binary{
 	"et":        detect.ET,
 	"tailscale": detect.Tailscale,
 	"tsh":       detect.Tsh,
+	"telnet":    detect.Telnet,
 }
 
 // Executor runs a fully-built argv (argv[0] is the resolved binary path) and
@@ -168,6 +169,8 @@ func buildArgv(proto, binPath, addr string, host *config.ResolvedHost) ([]string
 		return buildTailscaleArgv(binPath, addr, host.Tailscale), nil
 	case "tsh":
 		return buildTshArgv(binPath, addr, host.Tsh), nil
+	case "telnet":
+		return buildTelnetArgv(binPath, addr, host.Telnet), nil
 	default:
 		return nil, fmt.Errorf("unknown protocol %q", proto)
 	}

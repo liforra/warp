@@ -111,6 +111,14 @@ type TshOptions struct {
 	ExtraArgs []string `toml:"extra_args"`
 }
 
+// TelnetOptions is telnet-specific config, layered under host.<name>.telnet.
+// telnet predates ssh's exit-255 convention, so its fallback behavior in the
+// exit-code heuristic (see internal/client) is unverified.
+type TelnetOptions struct {
+	Options
+	ExtraArgs []string `toml:"extra_args"`
+}
+
 // HostConfig is one [host.X] table.
 type HostConfig struct {
 	RawAddresses any      `toml:"addresses"`
@@ -123,6 +131,7 @@ type HostConfig struct {
 	ET        ETOptions        `toml:"et"`
 	Tailscale TailscaleOptions `toml:"tailscale"`
 	Tsh       TshOptions       `toml:"tsh"`
+	Telnet    TelnetOptions    `toml:"telnet"`
 
 	// Addresses and Protocol are populated from RawAddresses/RawProtocol by
 	// normalize() after unmarshaling; use these, not the Raw* fields.
@@ -149,16 +158,37 @@ func (h *HostConfig) normalize(name string) error {
 
 // DefaultProtocolOrder is the fallback chain used when a host doesn't set
 // `protocol` at all: try the most capable/resilient options first, falling
-// back toward plain ssh, then toward the identity-based tools last (since
-// they require their own separate login/network setup rather than just a
-// key or password).
-var DefaultProtocolOrder = []string{"et", "mosh", "ssh", "tailscale", "tsh"}
+// back toward plain ssh, then toward the identity-based tools, and finally
+// telnet as the last resort (unencrypted, and its fallback behavior under
+// the exit-255 heuristic is unverified -- see internal/client).
+var DefaultProtocolOrder = []string{"et", "mosh", "ssh", "tailscale", "tsh", "telnet"}
+
+// ScanConfig configures `warp --scan`. Subnets is used whenever no --subnet
+// flag is given on the CLI; if that's also empty, warp falls back to
+// auto-detecting local subnets from network interfaces.
+type ScanConfig struct {
+	RawSubnets any `toml:"subnets"`
+	Workers    int `toml:"workers"`
+
+	// Subnets is populated from RawSubnets by normalize() after unmarshaling.
+	Subnets []string `toml:"-"`
+}
+
+func (s *ScanConfig) normalize() error {
+	subnets, err := toStringSlice(s.RawSubnets, "scan.subnets")
+	if err != nil {
+		return err
+	}
+	s.Subnets = subnets
+	return nil
+}
 
 // Config is the root of ~/.config/warp/config.toml.
 type Config struct {
 	Binaries map[string]string      `toml:"binaries"`
 	Defaults Options                `toml:"defaults"`
 	Hosts    map[string]*HostConfig `toml:"host"`
+	Scan     ScanConfig             `toml:"scan"`
 
 	// index maps every host key and alias to its canonical host key.
 	// Built by buildIndex after unmarshaling; not part of the TOML itself.
@@ -196,6 +226,9 @@ func Parse(data []byte) (*Config, error) {
 		if err := h.normalize(name); err != nil {
 			return nil, err
 		}
+	}
+	if err := cfg.Scan.normalize(); err != nil {
+		return nil, err
 	}
 	if err := cfg.buildIndex(); err != nil {
 		return nil, err
@@ -240,6 +273,7 @@ type ResolvedHost struct {
 	ET        ETOptions
 	Tailscale TailscaleOptions
 	Tsh       TshOptions
+	Telnet    TelnetOptions
 }
 
 // Resolve looks up nameOrAlias and merges [defaults] -> host generic
@@ -276,6 +310,9 @@ func (c *Config) Resolve(nameOrAlias string) (*ResolvedHost, error) {
 	tsh := h.Tsh
 	tsh.Options = mergeOptions(base, h.Tsh.Options)
 
+	telnet := h.Telnet
+	telnet.Options = mergeOptions(base, h.Telnet.Options)
+
 	return &ResolvedHost{
 		Name:      canon,
 		Addresses: h.Addresses,
@@ -285,5 +322,6 @@ func (c *Config) Resolve(nameOrAlias string) (*ResolvedHost, error) {
 		ET:        et,
 		Tailscale: tailscale,
 		Tsh:       tsh,
+		Telnet:    telnet,
 	}, nil
 }

@@ -19,10 +19,11 @@ const (
 	Tailscale Binary = "tailscale"
 	// Tsh is Teleport's client binary; `tsh ssh <host>` is the subcommand
 	// warp invokes.
-	Tsh Binary = "tsh"
+	Tsh    Binary = "tsh"
+	Telnet Binary = "telnet"
 )
 
-var All = []Binary{SSH, Mosh, ET, Tailscale, Tsh}
+var All = []Binary{SSH, Mosh, ET, Tailscale, Tsh, Telnet}
 
 // Result is the outcome of resolving a single binary.
 type Result struct {

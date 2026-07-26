@@ -7,6 +7,7 @@ mosh      = "/usr/bin/mosh"
 et        = "/usr/local/bin/et"
 tailscale = "/usr/bin/tailscale"
 tsh       = "/usr/local/bin/tsh"
+telnet    = "/usr/bin/telnet"
 
 [defaults]                     # shared by all protocols unless overridden below
 user = "alice"
@@ -43,11 +44,12 @@ keepalive = true
 
 [host.noproto]
 # No `protocol` set at all here, so warp uses its built-in default order:
-#   et -> mosh -> ssh -> tailscale -> tsh
+#   et -> mosh -> ssh -> tailscale -> tsh -> telnet
 # et/mosh both bootstrap over ssh, so if a host only actually runs sshd,
 # those attempts fail before any auth prompt and you land on plain ssh
 # having authenticated exactly once. tailscale/tsh use a separate identity
-# (your tailnet login / Teleport cluster login) instead of ssh keys.
+# (your tailnet login / Teleport cluster login) instead of ssh keys. telnet
+# is tried last, as an unencrypted last resort.
 addresses = "noproto.example.com"
 
 [host.tailnet-box]
@@ -61,3 +63,18 @@ protocol = "tsh"
 [host.teleport-box.tsh]
 cluster = "prod.example.com"
 proxy = "teleport.example.com:443"
+
+[host.old-switch]
+addresses = "old-switch.example.com"
+protocol = "telnet"                    # e.g. legacy network gear with no ssh support
+
+[host.old-switch.telnet]
+port = 23
+
+# `warp --scan` probes subnets for hosts speaking ssh/et/telnet, plus your
+# Tailscale peers (found via `tailscale status`, not a port scan). With no
+# --subnet flag on the CLI, it uses [scan].subnets below; with neither, it
+# auto-detects subnets from your local network interfaces.
+[scan]
+subnets = ["192.168.1.0/24"]
+# workers = 256                        # optional; concurrency cap, default 256
