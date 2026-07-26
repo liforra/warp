@@ -1,5 +1,5 @@
 # Installs the latest warp release for Windows.
-# Usage: irm https://raw.githubusercontent.com/liforra/warp/main/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/liforra/warp/master/install.ps1 | iex
 $ErrorActionPreference = "Stop"
 
 $Repo = "liforra/warp"

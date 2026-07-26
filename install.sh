@@ -1,7 +1,12 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Installs the latest warp release for the current OS/arch.
-# Usage: curl -fsSL https://raw.githubusercontent.com/liforra/warp/main/install.sh | sh
-set -euo pipefail
+# Usage: curl -fsSL https://raw.githubusercontent.com/liforra/warp/master/install.sh | sh
+#
+# Deliberately POSIX sh, not bash: `curl | sh` runs under whatever /bin/sh
+# is (dash on most Linux distros), which doesn't understand bash-only
+# syntax like `set -o pipefail` -- that alone previously made dash exit
+# immediately, breaking the pipe and failing the curl on the other end.
+set -eu
 
 REPO="liforra/warp"
 BINARY="warp"
@@ -25,8 +30,12 @@ case "$os" in
 		;;
 esac
 
-latest_tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" |
-	grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+release_json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")"
+# grep -m1 exits as soon as it finds a match; piping curl straight into it
+# can make curl try to write to an already-closed pipe (a harmless but
+# noisy "Failure writing output to destination" error) -- capturing the
+# full response first avoids that entirely.
+latest_tag="$(printf '%s' "$release_json" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
 if [ -z "$latest_tag" ]; then
 	echo "warp: could not determine latest release" >&2
 	exit 1
