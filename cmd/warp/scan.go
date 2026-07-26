@@ -25,6 +25,15 @@ func formatMatches(r scan.Result) string {
 	return strings.Join(parts, ", ")
 }
 
+// formatHostname renders a Result's best-effort hostname, or "-" when none
+// was found (e.g. no PTR record).
+func formatHostname(r scan.Result) string {
+	if r.Hostname == "" {
+		return "-"
+	}
+	return r.Hostname
+}
+
 // runScanHost implements `warp --scan --host=<name/ip/domain>`: probes just
 // that one host for every supported protocol/port, skipping subnet
 // expansion and Tailscale peer discovery entirely.
@@ -37,7 +46,7 @@ func runScanHost(host string) error {
 	}
 
 	for _, r := range results {
-		fmt.Printf("%-15s  %s\n", r.IP, formatMatches(r))
+		fmt.Printf("%-15s  %-30s  %s\n", r.IP, formatHostname(r), formatMatches(r))
 	}
 	return nil
 }
@@ -94,7 +103,7 @@ func runScan() error {
 		if r.Tailscale && len(r.Matches) > 0 {
 			origin = "  (tailscale peer)"
 		}
-		fmt.Printf("%-15s  %s%s\n", r.IP, formatMatches(r), origin)
+		fmt.Printf("%-15s  %-30s  %s%s\n", r.IP, formatHostname(r), formatMatches(r), origin)
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -65,6 +66,26 @@ func hasMatch(matches []Match, protocol string, port int) bool {
 	return false
 }
 
+// stubReverseLookup makes reverseLookup deterministic and network-free for
+// tests: known IPs return a fixed name, everything else returns "" (as a
+// real PTR-less LAN device would).
+func stubReverseLookup(t *testing.T, known map[string]string) {
+	t.Helper()
+	orig := reverseLookup
+	reverseLookup = func(ip net.IP) string { return known[ip.String()] }
+	t.Cleanup(func() { reverseLookup = orig })
+}
+
+// stubTailscaleUnavailable simulates "tailscale isn't installed/logged in"
+// so tests that don't care about Tailscale integration aren't affected by
+// (or dependent on) a real local tailscale installation.
+func stubTailscaleUnavailable(t *testing.T) {
+	t.Helper()
+	orig := tailscaleStatus
+	tailscaleStatus = func() ([]byte, error) { return nil, fmt.Errorf("tailscale not available in test") }
+	t.Cleanup(func() { tailscaleStatus = orig })
+}
+
 func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 	origDial := dial
 	origStatus := tailscaleStatus
@@ -72,12 +93,13 @@ func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 	tailscaleStatus = func() ([]byte, error) {
 		return []byte(`{
 			"Peer": {
-				"node1": {"TailscaleIPs": ["10.0.0.9"], "Online": true},
+				"node1": {"TailscaleIPs": ["10.0.0.9"], "Online": true, "DNSName": "peer9.tailnet-abc.ts.net."},
 				"node2": {"TailscaleIPs": ["10.0.0.99"], "Online": false},
-				"node3": {"TailscaleIPs": ["10.0.0.50"], "Online": true}
+				"node3": {"TailscaleIPs": ["10.0.0.50"], "Online": true, "HostName": "peer50"}
 			}
 		}`), nil
 	}
+	stubReverseLookup(t, map[string]string{"10.0.0.5": "host5.lan"})
 	defer func() {
 		dial = origDial
 		tailscaleStatus = origStatus
@@ -96,6 +118,9 @@ func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 	ssh, ok := byIP["10.0.0.5"]
 	if !ok || len(ssh.Matches) != 1 || !hasMatch(ssh.Matches, "ssh", 22) {
 		t.Errorf("10.0.0.5 matches = %+v, want [{ssh 22}]", ssh.Matches)
+	}
+	if ssh.Hostname != "host5.lan" {
+		t.Errorf("10.0.0.5 Hostname = %q, want %q (via reverse DNS)", ssh.Hostname, "host5.lan")
 	}
 
 	et, ok := byIP["10.0.0.6"]
@@ -118,6 +143,9 @@ func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 	if !hasMatch(peer.Matches, "ssh", 22) {
 		t.Errorf("10.0.0.9 matches = %+v, want to include {ssh 22}", peer.Matches)
 	}
+	if peer.Hostname != "peer9.tailnet-abc.ts.net" {
+		t.Errorf("10.0.0.9 Hostname = %q, want %q (DNSName, trailing dot trimmed)", peer.Hostname, "peer9.tailnet-abc.ts.net")
+	}
 
 	quietPeer, ok := byIP["10.0.0.50"]
 	if !ok {
@@ -125,6 +153,9 @@ func TestRunProbesSubnetAndTailscalePeers(t *testing.T) {
 	}
 	if !quietPeer.Tailscale || len(quietPeer.Matches) != 0 {
 		t.Errorf("10.0.0.50 = %+v, want Tailscale=true, Matches=empty", quietPeer)
+	}
+	if quietPeer.Hostname != "peer50" {
+		t.Errorf("10.0.0.50 Hostname = %q, want %q (HostName fallback, no DNSName)", quietPeer.Hostname, "peer50")
 	}
 
 	if _, ok := byIP["10.0.0.99"]; ok {
@@ -149,6 +180,8 @@ func TestScanHostReportsPortsForIPLiteral(t *testing.T) {
 		}
 		return nil, &net.OpError{Op: "dial", Err: errRefused{}}
 	}
+	stubReverseLookup(t, map[string]string{"203.0.113.5": "reverse.example.com"})
+	stubTailscaleUnavailable(t)
 	defer func() { dial = origDial }()
 
 	results, err := ScanHost("203.0.113.5")
@@ -161,6 +194,76 @@ func TestScanHostReportsPortsForIPLiteral(t *testing.T) {
 	if !hasMatch(results[0].Matches, "ssh", 22) {
 		t.Errorf("matches = %+v, want to include {ssh 22}", results[0].Matches)
 	}
+	if results[0].Hostname != "reverse.example.com" {
+		t.Errorf("Hostname = %q, want %q (IP literal input, so reverse DNS)", results[0].Hostname, "reverse.example.com")
+	}
+}
+
+func TestScanHostUsesQueriedNameNotReverseDNS(t *testing.T) {
+	origDial := dial
+	origLookup := lookupHost
+	dial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		if addr == "203.0.113.7:22" {
+			return fakeConn{}, nil
+		}
+		return nil, &net.OpError{Op: "dial", Err: errRefused{}}
+	}
+	lookupHost = func(host string) ([]string, error) {
+		if host != "myhost.example.com" {
+			t.Fatalf("lookupHost called with %q, want myhost.example.com", host)
+		}
+		return []string{"203.0.113.7"}, nil
+	}
+	// If either of these gets consulted, the queried DNS name wasn't
+	// preferred over it as it should be.
+	stubReverseLookup(t, map[string]string{"203.0.113.7": "should-not-be-used"})
+	stubTailscaleUnavailable(t)
+	defer func() {
+		dial = origDial
+		lookupHost = origLookup
+	}()
+
+	results, err := ScanHost("myhost.example.com")
+	if err != nil {
+		t.Fatalf("ScanHost: %v", err)
+	}
+	if len(results) != 1 || results[0].Hostname != "myhost.example.com" {
+		t.Fatalf("results = %+v, want one result with Hostname %q", results, "myhost.example.com")
+	}
+}
+
+func TestScanHostPrefersTailscaleHostnameOverReverseDNS(t *testing.T) {
+	origDial := dial
+	origStatus := tailscaleStatus
+	dial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		if addr == "100.64.0.5:22" {
+			return fakeConn{}, nil
+		}
+		return nil, &net.OpError{Op: "dial", Err: errRefused{}}
+	}
+	tailscaleStatus = func() ([]byte, error) {
+		return []byte(`{
+			"Peer": {
+				"node1": {"TailscaleIPs": ["100.64.0.5"], "Online": true, "DNSName": "mybox.tailnet-abc.ts.net."}
+			}
+		}`), nil
+	}
+	// If this gets called, the Tailscale hostname wasn't preferred over it
+	// -- CGNAT addresses like 100.64.0.5 have no real public PTR record, so
+	// falling through to reverse DNS would normally yield nothing anyway.
+	stubReverseLookup(t, map[string]string{"100.64.0.5": "should-not-be-used"})
+	defer func() {
+		dial = origDial
+		tailscaleStatus = origStatus
+	}()
+
+	results, err := ScanHost("100.64.0.5")
+	if err != nil {
+		t.Fatalf("ScanHost: %v", err)
+	}
+	if len(results) != 1 || results[0].Hostname != "mybox.tailnet-abc.ts.net" {
+		t.Fatalf("results = %+v, want one result with Hostname %q", results, "mybox.tailnet-abc.ts.net")
+	}
 }
 
 func TestScanHostReportsEmptyMatchesRatherThanDropping(t *testing.T) {
@@ -168,6 +271,8 @@ func TestScanHostReportsEmptyMatchesRatherThanDropping(t *testing.T) {
 	dial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
 		return nil, &net.OpError{Op: "dial", Err: errRefused{}}
 	}
+	stubReverseLookup(t, nil)
+	stubTailscaleUnavailable(t)
 	defer func() { dial = origDial }()
 
 	results, err := ScanHost("203.0.113.9")
