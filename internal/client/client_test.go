@@ -30,6 +30,20 @@ func stubDialAlwaysReachable(t *testing.T) {
 	t.Cleanup(func() { dial = orig })
 }
 
+// stubMultiplexUnavailable makes every multiplexer.controlPath call fail,
+// so tests that don't care about warp's own ControlMaster management
+// don't spawn real ssh processes (Connect always tries to resolve one when
+// detect.SSH happens to be registered, e.g. to the test binary itself,
+// which -- left unstubbed -- gets invoked with nonsense ssh flags).
+func stubMultiplexUnavailable(t *testing.T) {
+	t.Helper()
+	orig := runSSHCommand
+	runSSHCommand = func(sshPath string, args ...string) error {
+		return errors.New("ssh unavailable in test")
+	}
+	t.Cleanup(func() { runSSHCommand = orig })
+}
+
 // fakeExecutor returns exit codes (and, optionally, stderr text) from
 // queues, in call order, so tests can script a sequence of connection
 // outcomes without spawning real processes.
@@ -70,6 +84,7 @@ func selfPath(t *testing.T) string {
 
 func TestConnectAddressFallbackThenProtocolFallback(t *testing.T) {
 	stubDialAlwaysReachable(t)
+	stubMultiplexUnavailable(t)
 	self := selfPath(t)
 	resolver := detect.NewResolver(map[detect.Binary]string{
 		detect.Mosh: self,
@@ -100,6 +115,7 @@ func TestConnectAddressFallbackThenProtocolFallback(t *testing.T) {
 
 func TestConnectNonConnectFailureStopsImmediately(t *testing.T) {
 	stubDialAlwaysReachable(t)
+	stubMultiplexUnavailable(t)
 	self := selfPath(t)
 	resolver := detect.NewResolver(map[detect.Binary]string{detect.SSH: self})
 
@@ -140,6 +156,7 @@ func TestConnectPreflightSkipsUnreachablePortWithoutInvokingBinary(t *testing.T)
 		return nil, errRefused{} // et's port (2022) is not
 	}
 	defer func() { dial = origDial }()
+	stubMultiplexUnavailable(t)
 
 	self := selfPath(t)
 	resolver := detect.NewResolver(map[detect.Binary]string{
@@ -178,6 +195,7 @@ func TestConnectPreflightSkipsUnreachablePortWithoutInvokingBinary(t *testing.T)
 // real session's own non-zero exit as a connection failure).
 func TestConnectRetriesMoshAfterNoMoshServerMarker(t *testing.T) {
 	stubDialAlwaysReachable(t)
+	stubMultiplexUnavailable(t)
 	self := selfPath(t)
 	resolver := detect.NewResolver(map[detect.Binary]string{
 		detect.Mosh: self,
@@ -213,6 +231,7 @@ func TestConnectRetriesMoshAfterNoMoshServerMarker(t *testing.T) {
 // remote command failed) must NOT be treated as a connection failure.
 func TestConnectDoesNotRetryMoshOnUnrelatedNonZeroExit(t *testing.T) {
 	stubDialAlwaysReachable(t)
+	stubMultiplexUnavailable(t)
 	self := selfPath(t)
 	resolver := detect.NewResolver(map[detect.Binary]string{
 		detect.Mosh: self,
@@ -247,6 +266,7 @@ func TestConnectDoesNotRetryMoshOnUnrelatedNonZeroExit(t *testing.T) {
 // setup gets a chance to reuse that connection instead of prompting again.
 func TestConnectPrioritizesLastAttemptedAddressForNextProtocol(t *testing.T) {
 	stubDialAlwaysReachable(t)
+	stubMultiplexUnavailable(t)
 	self := selfPath(t)
 	resolver := detect.NewResolver(map[detect.Binary]string{
 		detect.Mosh: self,
@@ -287,6 +307,59 @@ func TestConnectPrioritizesLastAttemptedAddressForNextProtocol(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("ssh call = %v, want it to target addr2 (mosh's last attempted address), not restart from addr1", sshCall)
+	}
+}
+
+// TestConnectInjectsControlPathWhenMultiplexerSucceeds confirms the actual
+// wiring end-to-end: when warp's own master connection is established
+// successfully, both the mosh and ssh argv it builds should carry a
+// ControlPath pointing at it, so a real ControlMaster setup can reuse the
+// connection across a mosh -> ssh fallback.
+func TestConnectInjectsControlPathWhenMultiplexerSucceeds(t *testing.T) {
+	stubDialAlwaysReachable(t)
+
+	origRunSSH := runSSHCommand
+	runSSHCommand = func(sshPath string, args ...string) error { return nil } // pretend the master always establishes
+	defer func() { runSSHCommand = origRunSSH }()
+
+	self := selfPath(t)
+	resolver := detect.NewResolver(map[detect.Binary]string{
+		detect.Mosh: self,
+		detect.SSH:  self,
+	})
+
+	host := &config.ResolvedHost{
+		Addresses: []string{"myhost"},
+		Protocols: []string{"mosh", "ssh"},
+	}
+
+	exec := &fakeExecutor{
+		codes:   []int{10, 0},
+		stderrs: []string{"/usr/bin/mosh: Did not find mosh server startup message. (Have you installed mosh on your server?)"},
+	}
+	conn := &Connector{Resolver: resolver, Exec: exec}
+
+	if _, err := conn.Connect(host); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (mosh, then ssh)", len(exec.calls))
+	}
+
+	moshCall := strings.Join(exec.calls[0], " ")
+	if !strings.Contains(moshCall, "ControlPath=") {
+		t.Errorf("mosh argv = %q, want it to contain a ControlPath", moshCall)
+	}
+
+	sshCall := exec.calls[1]
+	found := false
+	for _, arg := range sshCall {
+		if strings.HasPrefix(arg, "ControlPath=") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ssh argv = %v, want a -o ControlPath=... flag", sshCall)
 	}
 }
 

@@ -10,7 +10,10 @@ import (
 // buildMoshArgv maps merged mosh options + a chosen address to a mosh argv.
 // mosh bootstraps over ssh internally, so the identity file / bootstrap port
 // are passed through its --ssh flag rather than as direct mosh flags.
-func buildMoshArgv(binPath, addr string, opts config.MoshOptions) []string {
+// controlPath, if non-empty, is injected into that same --ssh flag so
+// mosh's bootstrap can reuse warp's own pre-established ControlMaster
+// connection instead of negotiating a fresh one (see multiplexer).
+func buildMoshArgv(binPath, addr string, opts config.MoshOptions, controlPath string) []string {
 	argv := []string{binPath}
 
 	if opts.Predict != "" {
@@ -29,6 +32,9 @@ func buildMoshArgv(binPath, addr string, opts config.MoshOptions) []string {
 	}
 	if opts.IdentityFile != "" {
 		sshOpts = append(sshOpts, "-i", opts.IdentityFile)
+	}
+	if controlPath != "" {
+		sshOpts = append(sshOpts, "-o", "ControlPath="+controlPath)
 	}
 	if len(sshOpts) > 0 {
 		argv = append(argv, "--ssh=ssh "+strings.Join(sshOpts, " "))

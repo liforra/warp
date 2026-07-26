@@ -50,6 +50,16 @@ type Options struct {
 	IdentityFile string `toml:"identity_file"`
 	Port         int    `toml:"port"`
 	Compression  *bool  `toml:"compression"`
+
+	// MultiplexPersist controls how long warp's own ssh ControlMaster
+	// connection (established before the first ssh/mosh attempt for a
+	// host, so falling from a failed mosh attempt through to ssh reuses
+	// the same authenticated connection instead of prompting again) stays
+	// alive after Connect finishes. A Go duration string (e.g. "5m"); if
+	// unset/empty, warp tears the connection down explicitly as soon as
+	// Connect returns rather than leaving anything running in the
+	// background.
+	MultiplexPersist string `toml:"multiplex_persist"`
 }
 
 // mergeOptions layers override on top of base: any field override sets
@@ -66,6 +76,9 @@ func mergeOptions(base, override Options) Options {
 	}
 	if override.Compression != nil {
 		base.Compression = override.Compression
+	}
+	if override.MultiplexPersist != "" {
+		base.MultiplexPersist = override.MultiplexPersist
 	}
 	return base
 }

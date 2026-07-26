@@ -236,6 +236,20 @@ func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 	// reuse that connection instead of prompting for auth again.
 	var preferredAddr string
 
+	// mux establishes warp's own ControlMaster connection (independent of
+	// mosh's own, which real-world testing showed doesn't reliably survive
+	// mosh aborting after a failed bootstrap) before the first ssh/mosh
+	// attempt, so a mosh failure can fall through to ssh without
+	// prompting for auth again. Best-effort: if ssh isn't resolvable, mux
+	// just never manages to establish anything and every controlPath call
+	// returns "", which every builder already treats as "no ControlPath."
+	sshPath := ""
+	if res := c.Resolver.Resolve(detect.SSH); res.Err == nil {
+		sshPath = res.Path
+	}
+	mux := newMultiplexer(sshPath, parseMultiplexPersist(host.SSH.MultiplexPersist))
+	defer mux.closeAll()
+
 	for _, proto := range host.Protocols {
 		bin, ok := protoBinary[proto]
 		if !ok {
@@ -268,7 +282,13 @@ func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 			fmt.Fprintf(os.Stderr, "Connecting with %s (%s)...\n", labelFor(proto), addr)
 			preferredAddr = addr
 
-			argv, err := buildArgv(proto, res.Path, addr, host)
+			var controlPath string
+			if user, identityFile, ok := sshLikeCreds(proto, host); ok {
+				port, _ := preflightPort(proto, host)
+				controlPath = mux.controlPath(user, addr, port, identityFile)
+			}
+
+			argv, err := buildArgv(proto, res.Path, addr, host, controlPath)
 			if err != nil {
 				attempts = append(attempts, Attempt{Protocol: proto, Address: addr, Skipped: true, Reason: err.Error()})
 				continue
@@ -322,12 +342,43 @@ func prioritizeAddr(addrs []string, preferred string) []string {
 	return out
 }
 
-func buildArgv(proto, binPath, addr string, host *config.ResolvedHost) ([]string, error) {
+// sshLikeCreds returns the (user, identityFile) to use when establishing a
+// warp-owned ControlMaster connection for proto, and whether proto goes
+// over ssh transport at all (only ssh and mosh do, from warp's side -- et
+// bootstraps via ssh too, but parses ssh_config itself internally rather
+// than shelling out to a controllable `ssh` subprocess, so there's no
+// ControlPath we can hand it).
+func sshLikeCreds(proto string, host *config.ResolvedHost) (user, identityFile string, ok bool) {
 	switch proto {
 	case "ssh":
-		return buildSSHArgv(binPath, addr, host.SSH), nil
+		return host.SSH.User, host.SSH.IdentityFile, true
 	case "mosh":
-		return buildMoshArgv(binPath, addr, host.Mosh), nil
+		return host.Mosh.User, host.Mosh.IdentityFile, true
+	default:
+		return "", "", false
+	}
+}
+
+// parseMultiplexPersist parses an Options.MultiplexPersist duration
+// string, treating anything empty or invalid as 0 (i.e. "tear down
+// warp's ControlMaster connection explicitly once Connect finishes").
+func parseMultiplexPersist(s string) time.Duration {
+	if s == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+func buildArgv(proto, binPath, addr string, host *config.ResolvedHost, controlPath string) ([]string, error) {
+	switch proto {
+	case "ssh":
+		return buildSSHArgv(binPath, addr, host.SSH, controlPath), nil
+	case "mosh":
+		return buildMoshArgv(binPath, addr, host.Mosh, controlPath), nil
 	case "et":
 		return buildETArgv(binPath, addr, host.ET), nil
 	case "tailscale":

@@ -14,6 +14,16 @@ user = "alice"
 identity_file = "~/.ssh/id_ed25519"
 port = 22
 compression = true
+# multiplex_persist = "5m"      # keep warp's own ssh ControlMaster connection alive
+                                # for this long after Connect finishes (a Go duration
+                                # string), instead of tearing it down immediately.
+                                # warp always establishes its own ControlMaster
+                                # connection before the first ssh/mosh attempt for a
+                                # host, so a mosh failure (e.g. mosh-server missing on
+                                # the remote) can fall through to ssh without a second
+                                # auth prompt -- this doesn't depend on mosh's own
+                                # aborted bootstrap leaving behind a usable socket,
+                                # which it doesn't reliably do.
 
 [host.myserver]
 addresses = ["myserver.example.com", "10.0.0.5", "192.168.1.5"]  # tried in order
