@@ -285,6 +285,32 @@ func Load(path string) (*Config, error) {
 	return Parse(data)
 }
 
+// LoadOrDefault loads the config at explicitPath, or -- if explicitPath is
+// empty -- from the default location (DefaultPath). A missing file at the
+// *default* location isn't an error: it's treated as an empty config, so
+// [sources] auto-importing from ~/.ssh/config and ~/.netrc still works
+// with zero warp-specific setup (e.g. before ever running `warp init`). An
+// explicitly-given --config path that doesn't exist is still an error.
+func LoadOrDefault(explicitPath string) (*Config, error) {
+	if explicitPath != "" {
+		return Load(explicitPath)
+	}
+
+	path, err := DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Parse(nil)
+		}
+		return nil, fmt.Errorf("reading config %q: %w", path, err)
+	}
+	return Parse(data)
+}
+
 // Parse decodes raw TOML bytes into a Config and builds its index.
 func Parse(data []byte) (*Config, error) {
 	var cfg Config

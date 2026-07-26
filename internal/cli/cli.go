@@ -95,15 +95,7 @@ func Execute() int {
 }
 
 func loadConfig() (*config.Config, error) {
-	path := configPath
-	if path == "" {
-		p, err := config.DefaultPath()
-		if err != nil {
-			return nil, err
-		}
-		path = p
-	}
-	return config.Load(path)
+	return config.LoadOrDefault(configPath)
 }
 
 // binaryOverrides adapts the config's [binaries] table (string keys) to the

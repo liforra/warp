@@ -396,6 +396,33 @@ enabled = false
 	}
 }
 
+func TestLoadOrDefaultMissingDefaultFileIsNotAnError(t *testing.T) {
+	// os.UserConfigDir() (used by DefaultPath) reads $HOME/$XDG_CONFIG_HOME
+	// directly, independent of the userHomeDir override used for ssh_config/
+	// netrc sourcing -- redirect it too, so this doesn't depend on whatever
+	// the test-running machine's real ~/.config/warp/config.toml contains.
+	fakeHome, err := userHomeDir()
+	if err != nil {
+		t.Fatalf("userHomeDir: %v", err)
+	}
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	cfg, err := LoadOrDefault("")
+	if err != nil {
+		t.Fatalf("LoadOrDefault(\"\") with no default file present: %v", err)
+	}
+	if len(cfg.Hosts) != 0 {
+		t.Errorf("Hosts = %v, want none (no config file, no ssh_config in fake home)", cfg.Hosts)
+	}
+}
+
+func TestLoadOrDefaultExplicitMissingPathIsAnError(t *testing.T) {
+	if _, err := LoadOrDefault("/nonexistent/explicit/path/config.toml"); err == nil {
+		t.Fatal("expected an error for an explicitly-given missing --config path, got nil")
+	}
+}
+
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
