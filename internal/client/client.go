@@ -4,9 +4,12 @@ package client
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/liforra/warp/internal/config"
 	"github.com/liforra/warp/internal/detect"
@@ -17,17 +20,63 @@ import (
 // "try the next thing," anything else means a real session happened and its
 // exit code should propagate.
 //
-// et and mosh both bootstrap over ssh, so a failure before that bootstrap
-// completes (server unreachable, port closed, auth rejected) reliably exits
-// 255 too, and warp falls through to the next protocol without having
-// prompted for credentials at all. If the bootstrap succeeds (you've already
-// authenticated once) but the session fails afterward -- mosh-server missing,
-// a firewalled UDP range -- the client's own exit code is generally *not*
-// 255, so warp deliberately stops and reports the failure rather than
-// silently opening a second, separately-authenticated session. tailscale and
-// tsh don't share ssh's 255 convention at all; treat their fallback behavior
-// here as unverified until tested against a real deployment.
+// This convention is NOT universal, though -- et, confirmed by testing,
+// exits 1 on a connection failure ("Could not reach the ET server"), not
+// 255, and would otherwise be misread as "a session happened, stop" instead
+// of falling through to the next protocol. Rather than guess at (and
+// maintain) each binary's own exit-code convention, preflightPort checks
+// TCP reachability directly before ever invoking the binary, for any
+// protocol with a well-defined port -- the same idea `warp --scan` uses.
+// That resolves the common case (nothing listening at all) generically,
+// across every protocol, without relying on exit codes at all. It can't
+// help with a failure *after* the port answers (wrong credentials, a
+// firewall that answers SYN but drops later packets, a protocol-level
+// handshake failure) -- those still fall back to the exit-255 heuristic
+// below, which remains ssh-specific and unverified for tailscale/tsh.
 const connectFailureCode = 255
+
+// preflightTimeout bounds the TCP reachability check done before invoking
+// a protocol's binary at all.
+const preflightTimeout = 3 * time.Second
+
+// dial is overridden in tests to avoid touching the network.
+var dial = net.DialTimeout
+
+// preflightPort returns the port to reachability-check for proto before
+// invoking its binary, and whether such a check applies at all. mosh
+// bootstraps over ssh, so its bootstrap ssh port is checked. tailscale and
+// tsh have no fixed, meaningfully-checkable port from here (tailscale ssh
+// runs over the tailnet's own transport; tsh goes through a central
+// proxy), so they're always attempted directly.
+func preflightPort(proto string, host *config.ResolvedHost) (port int, ok bool) {
+	switch proto {
+	case "ssh":
+		if p := host.SSH.Port; p != 0 {
+			return p, true
+		}
+		return 22, true
+	case "mosh":
+		if p := host.Mosh.SSHPort; p != 0 {
+			return p, true
+		}
+		if p := host.Mosh.Port; p != 0 {
+			return p, true
+		}
+		return 22, true
+	case "et":
+		if p := host.ET.Port; p != 0 {
+			return p, true
+		}
+		return 2022, true
+	case "telnet":
+		if p := host.Telnet.Port; p != 0 {
+			return p, true
+		}
+		return 23, true
+	default:
+		return 0, false
+	}
+}
 
 var protoBinary = map[string]detect.Binary{
 	"ssh":       detect.SSH,
@@ -113,9 +162,14 @@ func NewConnector(resolver *detect.Resolver) *Connector {
 
 // Connect tries each protocol in host.Protocols, in order; for each
 // protocol it tries every address in host.Addresses before moving on to the
-// next protocol. It returns the exit code of the first session that
-// actually ran (any exit code other than 255 counts as "a session
-// happened"), or a *ConnectFailedErr if nothing connected.
+// next protocol. Before invoking a protocol's binary at all, it does a TCP
+// reachability preflight on that protocol's port (see preflightPort) and
+// skips straight to the next address/protocol if nothing answers there --
+// this is what actually handles "nothing is listening," generically,
+// rather than relying on the binary's own exit code. It returns the exit
+// code of the first session that actually ran (any exit code other than
+// 255 counts as "a session happened," for protocols that get that far --
+// see connectFailureCode), or a *ConnectFailedErr if nothing connected.
 func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 	var attempts []Attempt
 
@@ -133,6 +187,16 @@ func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 		}
 
 		for _, addr := range host.Addresses {
+			if port, ok := preflightPort(proto, host); ok {
+				addrPort := net.JoinHostPort(addr, strconv.Itoa(port))
+				conn, dialErr := dial("tcp", addrPort, preflightTimeout)
+				if dialErr != nil {
+					attempts = append(attempts, Attempt{Protocol: proto, Address: addr, Skipped: true, Reason: fmt.Sprintf("port %d unreachable: %v", port, dialErr)})
+					continue
+				}
+				conn.Close()
+			}
+
 			argv, err := buildArgv(proto, res.Path, addr, host)
 			if err != nil {
 				attempts = append(attempts, Attempt{Protocol: proto, Address: addr, Skipped: true, Reason: err.Error()})

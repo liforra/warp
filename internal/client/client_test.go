@@ -2,12 +2,32 @@ package client
 
 import (
 	"errors"
+	"net"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/liforra/warp/internal/config"
 	"github.com/liforra/warp/internal/detect"
 )
+
+// fakeConn is a minimal net.Conn stand-in so the preflight check can call
+// Close() on it without touching a real socket.
+type fakeConn struct{ net.Conn }
+
+func (fakeConn) Close() error { return nil }
+
+// stubDialAlwaysReachable makes the preflight port check always succeed, so
+// tests that exercise the exit-code fallback behavior (not the preflight
+// itself) reach the fake Executor as before.
+func stubDialAlwaysReachable(t *testing.T) {
+	t.Helper()
+	orig := dial
+	dial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		return fakeConn{}, nil
+	}
+	t.Cleanup(func() { dial = orig })
+}
 
 // fakeExecutor returns exit codes from a queue, in call order, so tests can
 // script a sequence of connection outcomes without spawning real processes.
@@ -38,6 +58,7 @@ func selfPath(t *testing.T) string {
 }
 
 func TestConnectAddressFallbackThenProtocolFallback(t *testing.T) {
+	stubDialAlwaysReachable(t)
 	self := selfPath(t)
 	resolver := detect.NewResolver(map[detect.Binary]string{
 		detect.Mosh: self,
@@ -67,6 +88,7 @@ func TestConnectAddressFallbackThenProtocolFallback(t *testing.T) {
 }
 
 func TestConnectNonConnectFailureStopsImmediately(t *testing.T) {
+	stubDialAlwaysReachable(t)
 	self := selfPath(t)
 	resolver := detect.NewResolver(map[detect.Binary]string{detect.SSH: self})
 
@@ -91,6 +113,54 @@ func TestConnectNonConnectFailureStopsImmediately(t *testing.T) {
 		t.Fatalf("calls = %d, want 1 (should not try addr2)", len(exec.calls))
 	}
 }
+
+// TestConnectPreflightSkipsUnreachablePortWithoutInvokingBinary reproduces
+// the real bug this preflight check fixes: et exits 1 (not ssh's 255) on a
+// connection failure, so relying on exit codes alone would misread that as
+// "a session happened" and stop instead of falling through to ssh. The
+// preflight check must skip et before ever invoking it, based on port
+// reachability alone, regardless of what its exit code would have been.
+func TestConnectPreflightSkipsUnreachablePortWithoutInvokingBinary(t *testing.T) {
+	origDial := dial
+	dial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		if addr == "myhost:22" {
+			return fakeConn{}, nil // ssh's port is reachable
+		}
+		return nil, errRefused{} // et's port (2022) is not
+	}
+	defer func() { dial = origDial }()
+
+	self := selfPath(t)
+	resolver := detect.NewResolver(map[detect.Binary]string{
+		detect.ET:  self,
+		detect.SSH: self,
+	})
+
+	host := &config.ResolvedHost{
+		Addresses: []string{"myhost"},
+		Protocols: []string{"et", "ssh"},
+	}
+
+	// et should never actually be invoked (preflight skips it), so ssh gets
+	// the only exec call and should succeed.
+	exec := &fakeExecutor{codes: []int{0}}
+	conn := &Connector{Resolver: resolver, Exec: exec}
+
+	code, err := conn.Connect(host)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if code != 0 {
+		t.Errorf("code = %d, want 0 (ssh should have succeeded)", code)
+	}
+	if len(exec.calls) != 1 {
+		t.Fatalf("calls = %d, want 1 -- et should never have been invoked (port unreachable), only ssh", len(exec.calls))
+	}
+}
+
+type errRefused struct{}
+
+func (errRefused) Error() string { return "connection refused" }
 
 func TestConnectAllFailReturnsConnectFailedErr(t *testing.T) {
 	resolver := detect.NewResolver(map[detect.Binary]string{
