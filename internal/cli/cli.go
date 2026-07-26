@@ -114,7 +114,7 @@ func runConnect(hostArg string) error {
 		return err
 	}
 
-	resolved, err := cfg.Resolve(hostArg)
+	resolved, err := cfg.ResolveOrDefault(hostArg)
 	if err != nil {
 		return err
 	}

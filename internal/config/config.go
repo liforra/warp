@@ -575,3 +575,33 @@ func (c *Config) Resolve(nameOrAlias string) (*ResolvedHost, error) {
 		Telnet:    telnet,
 	}, nil
 }
+
+// ResolveOrDefault behaves like Resolve, but if nameOrAlias doesn't match
+// any configured host or alias (including anything auto-sourced), it
+// builds an ad-hoc host on the fly instead of erroring: nameOrAlias itself
+// becomes the sole address, DefaultProtocolOrder is used, and only
+// [defaults] applies (there's no host entry to layer on top of it). This
+// lets `warp <anything>` work for a one-off address you've never
+// configured, not just hosts explicitly set up or sourced.
+//
+// A host that *is* found but is genuinely misconfigured (e.g. no
+// addresses) still returns that real error from Resolve rather than
+// silently falling back to an ad-hoc guess.
+func (c *Config) ResolveOrDefault(nameOrAlias string) (*ResolvedHost, error) {
+	if _, _, ok := c.FindHost(nameOrAlias); ok {
+		return c.Resolve(nameOrAlias)
+	}
+
+	base := c.Defaults
+	return &ResolvedHost{
+		Name:      nameOrAlias,
+		Addresses: []string{nameOrAlias},
+		Protocols: DefaultProtocolOrder,
+		SSH:       SSHOptions{Options: base},
+		Mosh:      MoshOptions{Options: base},
+		ET:        ETOptions{Options: base},
+		Tailscale: TailscaleOptions{Options: base, Socket: c.Tailscale.Socket},
+		Tsh:       TshOptions{Options: base},
+		Telnet:    TelnetOptions{Options: base},
+	}, nil
+}

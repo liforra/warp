@@ -29,21 +29,31 @@ func stubDialAlwaysReachable(t *testing.T) {
 	t.Cleanup(func() { dial = orig })
 }
 
-// fakeExecutor returns exit codes from a queue, in call order, so tests can
-// script a sequence of connection outcomes without spawning real processes.
+// fakeExecutor returns exit codes (and, optionally, stderr text) from
+// queues, in call order, so tests can script a sequence of connection
+// outcomes without spawning real processes.
 type fakeExecutor struct {
-	codes []int
-	calls [][]string
+	codes   []int
+	stderrs []string
+	calls   [][]string
 }
 
-func (f *fakeExecutor) Run(argv []string) (int, error) {
+func (f *fakeExecutor) Run(argv []string) (int, string, error) {
 	f.calls = append(f.calls, argv)
-	if len(f.codes) == 0 {
-		return 0, nil
+
+	code := 0
+	if len(f.codes) > 0 {
+		code = f.codes[0]
+		f.codes = f.codes[1:]
 	}
-	code := f.codes[0]
-	f.codes = f.codes[1:]
-	return code, nil
+
+	stderr := ""
+	if len(f.stderrs) > 0 {
+		stderr = f.stderrs[0]
+		f.stderrs = f.stderrs[1:]
+	}
+
+	return code, stderr, nil
 }
 
 // selfPath returns a path that is guaranteed to exist and be executable, so
@@ -155,6 +165,76 @@ func TestConnectPreflightSkipsUnreachablePortWithoutInvokingBinary(t *testing.T)
 	}
 	if len(exec.calls) != 1 {
 		t.Fatalf("calls = %d, want 1 -- et should never have been invoked (port unreachable), only ssh", len(exec.calls))
+	}
+}
+
+// TestConnectRetriesMoshAfterNoMoshServerMarker reproduces the second
+// real-world bug: mosh's own ssh bootstrap succeeds (port reachable, so
+// preflight passes) but mosh-server isn't installed on the remote, so mosh
+// exits non-255 anyway. That must still be treated as retriable -- ssh
+// should get a chance -- based on mosh's stable stderr message, not by
+// treating every non-zero mosh exit as retriable (which risks misreading a
+// real session's own non-zero exit as a connection failure).
+func TestConnectRetriesMoshAfterNoMoshServerMarker(t *testing.T) {
+	stubDialAlwaysReachable(t)
+	self := selfPath(t)
+	resolver := detect.NewResolver(map[detect.Binary]string{
+		detect.Mosh: self,
+		detect.SSH:  self,
+	})
+
+	host := &config.ResolvedHost{
+		Addresses: []string{"myhost"},
+		Protocols: []string{"mosh", "ssh"},
+	}
+
+	exec := &fakeExecutor{
+		codes:   []int{10, 0},
+		stderrs: []string{"/usr/bin/mosh: Did not find mosh server startup message. (Have you installed mosh on your server?)"},
+	}
+	conn := &Connector{Resolver: resolver, Exec: exec}
+
+	code, err := conn.Connect(host)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if code != 0 {
+		t.Errorf("code = %d, want 0 (ssh should have been tried and succeeded)", code)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (mosh, then ssh)", len(exec.calls))
+	}
+}
+
+// TestConnectDoesNotRetryMoshOnUnrelatedNonZeroExit guards against
+// over-broadening the mosh check to "any non-zero exit": a real session
+// that happens to end with a non-zero exit status (e.g. the user's last
+// remote command failed) must NOT be treated as a connection failure.
+func TestConnectDoesNotRetryMoshOnUnrelatedNonZeroExit(t *testing.T) {
+	stubDialAlwaysReachable(t)
+	self := selfPath(t)
+	resolver := detect.NewResolver(map[detect.Binary]string{
+		detect.Mosh: self,
+		detect.SSH:  self,
+	})
+
+	host := &config.ResolvedHost{
+		Addresses: []string{"myhost"},
+		Protocols: []string{"mosh", "ssh"},
+	}
+
+	exec := &fakeExecutor{codes: []int{1}} // no matching stderr marker
+	conn := &Connector{Resolver: resolver, Exec: exec}
+
+	code, err := conn.Connect(host)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if code != 1 {
+		t.Errorf("code = %d, want 1 (a real session's own exit code, propagated)", code)
+	}
+	if len(exec.calls) != 1 {
+		t.Fatalf("calls = %d, want 1 (should not have fallen through to ssh)", len(exec.calls))
 	}
 }
 

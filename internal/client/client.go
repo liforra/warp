@@ -3,7 +3,9 @@
 package client
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -87,32 +89,80 @@ var protoBinary = map[string]detect.Binary{
 	"telnet":    detect.Telnet,
 }
 
-// Executor runs a fully-built argv (argv[0] is the resolved binary path) and
-// reports its exit code. It's an interface so tests can substitute a fake
+// protoLabel is the human-friendly name printed in the "Connecting with
+// ..." announcement just before a protocol is actually invoked.
+var protoLabel = map[string]string{
+	"ssh":       "SSH",
+	"mosh":      "Mosh",
+	"et":        "ET",
+	"tailscale": "Tailscale SSH",
+	"tsh":       "Teleport (tsh)",
+	"telnet":    "Telnet",
+}
+
+func labelFor(proto string) string {
+	if l, ok := protoLabel[proto]; ok {
+		return l
+	}
+	return proto
+}
+
+// Executor runs a fully-built argv (argv[0] is the resolved binary path)
+// and reports its exit code, plus a copy of what it wrote to stderr (used
+// to detect known non-255 connection-failure signatures -- see
+// knownFailureMarkers). It's an interface so tests can substitute a fake
 // without spawning real processes.
 type Executor interface {
-	Run(argv []string) (exitCode int, err error)
+	Run(argv []string) (exitCode int, stderr string, err error)
 }
 
 // ExecExecutor is the real Executor: it runs the command with the current
 // process's stdio wired through, so interactive sessions behave normally.
+// stderr is additionally captured (via io.MultiWriter) for the caller to
+// inspect, without changing what the user actually sees on their terminal.
 type ExecExecutor struct{}
 
-func (ExecExecutor) Run(argv []string) (int, error) {
+func (ExecExecutor) Run(argv []string) (int, string, error) {
+	var stderrBuf bytes.Buffer
+
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	err := cmd.Run()
 	if err == nil {
-		return 0, nil
+		return 0, stderrBuf.String(), nil
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
-		return exitErr.ExitCode(), nil
+		return exitErr.ExitCode(), stderrBuf.String(), nil
 	}
 	// The process never started (binary vanished, permissions, etc.).
-	return -1, err
+	return -1, stderrBuf.String(), err
+}
+
+// knownFailureMarkers are stable, protocol-specific stderr substrings that
+// indicate a connection-level failure even though the binary's own exit
+// code doesn't follow ssh's 255 convention. Confirmed by real-world
+// testing: mosh's ssh bootstrap can succeed (you've already authenticated)
+// while mosh itself still fails because mosh-server isn't installed on the
+// remote -- mosh's exit code for that isn't 255, so without this it would
+// be misread as "a session happened, stop" instead of falling through to
+// the next protocol. This is deliberately narrow (an exact, stable message)
+// rather than "treat any non-zero mosh exit as retriable," which would
+// risk misreading a real interactive session's own non-zero exit status
+// (e.g. the user's last command failed) as a connection failure.
+var knownFailureMarkers = map[string][]string{
+	"mosh": {"Did not find mosh server startup message"},
+}
+
+func isKnownConnectFailure(proto, stderr string) bool {
+	for _, marker := range knownFailureMarkers[proto] {
+		if strings.Contains(stderr, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // Attempt records the outcome of trying one (protocol, address) pair, for
@@ -197,19 +247,26 @@ func (c *Connector) Connect(host *config.ResolvedHost) (int, error) {
 				conn.Close()
 			}
 
+			// Only announced once we've confirmed (via preflight, where
+			// applicable) that this attempt is actually worth making --
+			// tailscale/tsh have no preflight check, so for those it's
+			// printed right before invoking regardless, since there's no
+			// way to verify in advance.
+			fmt.Fprintf(os.Stderr, "Connecting with %s (%s)...\n", labelFor(proto), addr)
+
 			argv, err := buildArgv(proto, res.Path, addr, host)
 			if err != nil {
 				attempts = append(attempts, Attempt{Protocol: proto, Address: addr, Skipped: true, Reason: err.Error()})
 				continue
 			}
 
-			code, err := c.Exec.Run(argv)
+			code, stderr, err := c.Exec.Run(argv)
 			if err != nil {
 				attempts = append(attempts, Attempt{Protocol: proto, Address: addr, Skipped: true, Reason: err.Error()})
 				continue
 			}
 
-			if code == connectFailureCode {
+			if code == connectFailureCode || isKnownConnectFailure(proto, stderr) {
 				attempts = append(attempts, Attempt{Protocol: proto, Address: addr, ExitCode: code})
 				continue
 			}

@@ -423,6 +423,82 @@ func TestLoadOrDefaultExplicitMissingPathIsAnError(t *testing.T) {
 	}
 }
 
+func TestResolveOrDefaultFallsBackForUnknownHost(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[sources.ssh_config]
+enabled = false
+[sources.netrc]
+enabled = false
+
+[defaults]
+user = "alice"
+port = 2222
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	resolved, err := cfg.ResolveOrDefault("sexy_bitch.liforra.de")
+	if err != nil {
+		t.Fatalf("ResolveOrDefault: %v", err)
+	}
+	if !slicesEqual(resolved.Addresses, []string{"sexy_bitch.liforra.de"}) {
+		t.Errorf("Addresses = %v, want [sexy_bitch.liforra.de]", resolved.Addresses)
+	}
+	if !slicesEqual(resolved.Protocols, DefaultProtocolOrder) {
+		t.Errorf("Protocols = %v, want DefaultProtocolOrder", resolved.Protocols)
+	}
+	if resolved.SSH.User != "alice" || resolved.SSH.Port != 2222 {
+		t.Errorf("SSH = %+v, want [defaults] applied (User=alice Port=2222)", resolved.SSH)
+	}
+}
+
+func TestResolveOrDefaultPrefersConfiguredHost(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[sources.ssh_config]
+enabled = false
+[sources.netrc]
+enabled = false
+
+[host.myserver]
+addresses = "myserver.example.com"
+protocol = "ssh"
+user = "configured-user"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	resolved, err := cfg.ResolveOrDefault("myserver")
+	if err != nil {
+		t.Fatalf("ResolveOrDefault: %v", err)
+	}
+	if resolved.SSH.User != "configured-user" {
+		t.Errorf("SSH.User = %q, want configured-user (should use the real configured host, not an ad-hoc guess)", resolved.SSH.User)
+	}
+}
+
+func TestResolveOrDefaultStillErrorsOnRealMisconfiguration(t *testing.T) {
+	// A host that exists but has no addresses is a real config error, not
+	// something to silently paper over with an ad-hoc fallback.
+	cfg, err := Parse([]byte(`
+[sources.ssh_config]
+enabled = false
+[sources.netrc]
+enabled = false
+
+[host.broken]
+protocol = "ssh"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if _, err := cfg.ResolveOrDefault("broken"); err == nil {
+		t.Fatal("expected an error for a configured host with no addresses, got nil")
+	}
+}
+
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
