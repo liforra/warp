@@ -29,6 +29,17 @@ jobs:
           sha="$(git rev-parse --short=7 HEAD)"
           echo "tag=v${base}-${sha}" >> "$GITHUB_OUTPUT"
 
+      - name: Create and push tag
+        # GoReleaser validates that its current tag actually exists and
+        # points at HEAD before it will release -- GORELEASER_CURRENT_TAG
+        # alone doesn't create one, it just picks which existing tag to
+        # use. actions/checkout already leaves the repo authenticated for
+        # push via GITHUB_TOKEN (contents: write, set above).
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          git tag "$tag"
+          git push origin "$tag"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -37,7 +48,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Lets GoReleaser build/tag this release as v<VERSION>-<sha>
-          # without requiring an actual annotated git tag to exist first;
-          # GitHub creates the underlying tag when the release is published.
           GORELEASER_CURRENT_TAG: ${{ steps.version.outputs.tag }}
