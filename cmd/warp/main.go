@@ -15,6 +15,11 @@ import (
 var (
 	configPath    string
 	protoOverride string
+
+	// version and commit are set via -ldflags at release build time
+	// (see .goreleaser.yaml); "dev"/"unknown" are the go build/go run defaults.
+	version = "dev"
+	commit  = "unknown"
 )
 
 func main() {
@@ -50,7 +55,7 @@ func main() {
 	}
 	connectCmd.Flags().StringVar(&protoOverride, "proto", "", "comma-separated protocol chain override for this invocation, e.g. ssh or mosh,ssh")
 
-	root.AddCommand(connectCmd, listCmd(), detectCmd(), configRootCmd(), initCmd())
+	root.AddCommand(connectCmd, listCmd(), detectCmd(), configRootCmd(), initCmd(), versionCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)

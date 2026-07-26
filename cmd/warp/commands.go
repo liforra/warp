@@ -12,6 +12,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the warp version and commit",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("warp %s (%s)\n", version, commit)
+			return nil
+		},
+	}
+}
+
 func listCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",

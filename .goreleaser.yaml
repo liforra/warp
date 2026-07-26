@@ -1,0 +1,91 @@
+version: 2
+
+project_name: warp
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: warp
+    main: ./cmd/warp
+    binary: warp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
+
+archives:
+  - id: default
+    ids: [warp]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+# Linux-only .deb/.rpm packages, built from the same linux binaries above.
+nfpms:
+  - id: packages
+    ids: [warp]
+    package_name: warp
+    file_name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    maintainer: "liforra <claude@liforra.de>"
+    homepage: "https://github.com/liforra/warp"
+    description: "Unified ssh/mosh/et launcher driven by a single TOML config"
+    license: "MIT"
+    formats:
+      - deb
+      - rpm
+
+release:
+  github:
+    owner: liforra
+    name: warp
+  # Version numbers are v<VERSION file contents>-<short commit sha> (see
+  # .github/workflows/release.yml), so every release is a prerelease-style
+  # build rather than a curated semver bump; mark every GitHub Release
+  # accordingly until a real tagging policy is introduced.
+  prerelease: auto
+
+changelog:
+  disable: true
+
+# --- Optional: uncomment once the corresponding tap/bucket repos exist and
+# a cross-repo PAT is stored as the HOMEBREW_TAP_GITHUB_TOKEN secret (the
+# default GITHUB_TOKEN can't push to a different repo). ---
+#
+# brews:
+#   - name: warp
+#     ids: [default]
+#     repository:
+#       owner: liforra
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     directory: Formula
+#     homepage: "https://github.com/liforra/warp"
+#     description: "Unified ssh/mosh/et launcher driven by a single TOML config"
+#     license: "MIT"
+#
+# scoops:
+#   - name: warp
+#     ids: [default]
+#     repository:
+#       owner: liforra
+#       name: scoop-bucket
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     homepage: "https://github.com/liforra/warp"
+#     description: "Unified ssh/mosh/et launcher driven by a single TOML config"
+#     license: "MIT"
