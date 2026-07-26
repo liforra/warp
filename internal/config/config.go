@@ -93,6 +93,24 @@ type ETOptions struct {
 	ExtraArgs     []string `toml:"extra_args"`
 }
 
+// TailscaleOptions is `tailscale ssh`-specific config, layered under
+// host.<name>.tailscale. Tailscale SSH authenticates via the tailnet
+// identity rather than a key/port, so it shares little with Options beyond
+// the username.
+type TailscaleOptions struct {
+	Options
+	ExtraArgs []string `toml:"extra_args"`
+}
+
+// TshOptions is Teleport's `tsh ssh`-specific config, layered under
+// host.<name>.tsh.
+type TshOptions struct {
+	Options
+	Cluster   string   `toml:"cluster"`
+	Proxy     string   `toml:"proxy"`
+	ExtraArgs []string `toml:"extra_args"`
+}
+
 // HostConfig is one [host.X] table.
 type HostConfig struct {
 	RawAddresses any      `toml:"addresses"`
@@ -100,9 +118,11 @@ type HostConfig struct {
 	RawProtocol  any      `toml:"protocol"`
 	Options
 
-	SSH  SSHOptions  `toml:"ssh"`
-	Mosh MoshOptions `toml:"mosh"`
-	ET   ETOptions   `toml:"et"`
+	SSH       SSHOptions       `toml:"ssh"`
+	Mosh      MoshOptions      `toml:"mosh"`
+	ET        ETOptions        `toml:"et"`
+	Tailscale TailscaleOptions `toml:"tailscale"`
+	Tsh       TshOptions       `toml:"tsh"`
 
 	// Addresses and Protocol are populated from RawAddresses/RawProtocol by
 	// normalize() after unmarshaling; use these, not the Raw* fields.
@@ -126,6 +146,13 @@ func (h *HostConfig) normalize(name string) error {
 
 	return nil
 }
+
+// DefaultProtocolOrder is the fallback chain used when a host doesn't set
+// `protocol` at all: try the most capable/resilient options first, falling
+// back toward plain ssh, then toward the identity-based tools last (since
+// they require their own separate login/network setup rather than just a
+// key or password).
+var DefaultProtocolOrder = []string{"et", "mosh", "ssh", "tailscale", "tsh"}
 
 // Config is the root of ~/.config/warp/config.toml.
 type Config struct {
@@ -211,10 +238,13 @@ type ResolvedHost struct {
 	SSH       SSHOptions
 	Mosh      MoshOptions
 	ET        ETOptions
+	Tailscale TailscaleOptions
+	Tsh       TshOptions
 }
 
 // Resolve looks up nameOrAlias and merges [defaults] -> host generic
-// options -> host.<protocol> options for each of the three protocols.
+// options -> host.<protocol> options for each protocol. If the host doesn't
+// set `protocol`, DefaultProtocolOrder is used instead of erroring.
 func (c *Config) Resolve(nameOrAlias string) (*ResolvedHost, error) {
 	canon, h, ok := c.FindHost(nameOrAlias)
 	if !ok {
@@ -223,8 +253,10 @@ func (c *Config) Resolve(nameOrAlias string) (*ResolvedHost, error) {
 	if len(h.Addresses) == 0 {
 		return nil, fmt.Errorf("host %q has no addresses configured", canon)
 	}
-	if len(h.Protocol) == 0 {
-		return nil, fmt.Errorf("host %q has no protocol configured", canon)
+
+	protocols := h.Protocol
+	if len(protocols) == 0 {
+		protocols = DefaultProtocolOrder
 	}
 
 	base := mergeOptions(c.Defaults, h.Options)
@@ -238,12 +270,20 @@ func (c *Config) Resolve(nameOrAlias string) (*ResolvedHost, error) {
 	et := h.ET
 	et.Options = mergeOptions(base, h.ET.Options)
 
+	tailscale := h.Tailscale
+	tailscale.Options = mergeOptions(base, h.Tailscale.Options)
+
+	tsh := h.Tsh
+	tsh.Options = mergeOptions(base, h.Tsh.Options)
+
 	return &ResolvedHost{
 		Name:      canon,
 		Addresses: h.Addresses,
-		Protocols: h.Protocol,
+		Protocols: protocols,
 		SSH:       ssh,
 		Mosh:      mosh,
 		ET:        et,
+		Tailscale: tailscale,
+		Tsh:       tsh,
 	}, nil
 }

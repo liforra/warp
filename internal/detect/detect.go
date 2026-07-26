@@ -1,4 +1,4 @@
-// Package detect resolves the ssh, mosh, and et binaries a host has installed.
+// Package detect resolves the client binaries warp can drive.
 package detect
 
 import (
@@ -7,16 +7,22 @@ import (
 	"sync"
 )
 
-// Binary identifies one of the three client programs warp can drive.
+// Binary identifies one of the client programs warp can drive.
 type Binary string
 
 const (
 	SSH  Binary = "ssh"
 	Mosh Binary = "mosh"
 	ET   Binary = "et"
+	// Tailscale is the `tailscale` binary; `tailscale ssh <host>` is the
+	// subcommand warp invokes.
+	Tailscale Binary = "tailscale"
+	// Tsh is Teleport's client binary; `tsh ssh <host>` is the subcommand
+	// warp invokes.
+	Tsh Binary = "tsh"
 )
 
-var All = []Binary{SSH, Mosh, ET}
+var All = []Binary{SSH, Mosh, ET, Tailscale, Tsh}
 
 // Result is the outcome of resolving a single binary.
 type Result struct {

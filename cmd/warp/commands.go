@@ -43,12 +43,21 @@ func listCmd() *cobra.Command {
 
 			for _, name := range names {
 				h := cfg.Hosts[name]
+				// Resolve rather than reading h.Protocol/h.Addresses
+				// directly, so a host that relies on DefaultProtocolOrder
+				// (no `protocol` set at all) shows the chain it will
+				// actually use instead of an empty list.
+				resolved, err := cfg.Resolve(name)
+				if err != nil {
+					return fmt.Errorf("host %q: %w", name, err)
+				}
+
 				fmt.Println(name)
 				if len(h.Aliases) > 0 {
 					fmt.Printf("  aliases:    %s\n", strings.Join(h.Aliases, ", "))
 				}
-				fmt.Printf("  addresses:  %s\n", strings.Join(h.Addresses, ", "))
-				fmt.Printf("  protocols:  %s\n", strings.Join(h.Protocol, ", "))
+				fmt.Printf("  addresses:  %s\n", strings.Join(resolved.Addresses, ", "))
+				fmt.Printf("  protocols:  %s\n", strings.Join(resolved.Protocols, ", "))
 			}
 			return nil
 		},
@@ -58,7 +67,7 @@ func listCmd() *cobra.Command {
 func detectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "detect",
-		Short: "Show resolved paths for ssh, mosh, and et",
+		Short: "Show resolved paths for each supported client binary",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Detection is useful even without a config file yet (e.g.
@@ -73,10 +82,10 @@ func detectCmd() *cobra.Command {
 			resolver := detect.NewResolver(overrides)
 			for _, res := range resolver.ResolveAll() {
 				if res.Err != nil {
-					fmt.Printf("%-6s not found: %v\n", res.Binary, res.Err)
+					fmt.Printf("%-9s not found: %v\n", res.Binary, res.Err)
 					continue
 				}
-				fmt.Printf("%-6s %s\n", res.Binary, res.Path)
+				fmt.Printf("%-9s %s\n", res.Binary, res.Path)
 			}
 			return nil
 		},

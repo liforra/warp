@@ -2,9 +2,11 @@
 # and edit to match your hosts.
 
 [binaries]                     # optional; omit an entry to resolve it via $PATH
-ssh = "/usr/bin/ssh"
-mosh = "/usr/bin/mosh"
-et   = "/usr/local/bin/et"
+ssh       = "/usr/bin/ssh"
+mosh      = "/usr/bin/mosh"
+et        = "/usr/local/bin/et"
+tailscale = "/usr/bin/tailscale"
+tsh       = "/usr/local/bin/tsh"
 
 [defaults]                     # shared by all protocols unless overridden below
 user = "alice"
@@ -38,3 +40,24 @@ port = 2022
 jumphost = "bastion.example.com"
 ssh_forwarding = false
 keepalive = true
+
+[host.noproto]
+# No `protocol` set at all here, so warp uses its built-in default order:
+#   et -> mosh -> ssh -> tailscale -> tsh
+# et/mosh both bootstrap over ssh, so if a host only actually runs sshd,
+# those attempts fail before any auth prompt and you land on plain ssh
+# having authenticated exactly once. tailscale/tsh use a separate identity
+# (your tailnet login / Teleport cluster login) instead of ssh keys.
+addresses = "noproto.example.com"
+
+[host.tailnet-box]
+addresses = "tailnet-box"              # tailscale hosts are addressed by name
+protocol = "tailscale"
+
+[host.teleport-box]
+addresses = "teleport-box.example.com"
+protocol = "tsh"
+
+[host.teleport-box.tsh]
+cluster = "prod.example.com"
+proxy = "teleport.example.com:443"

@@ -104,6 +104,25 @@ func TestAliasResolution(t *testing.T) {
 	}
 }
 
+func TestResolveDefaultsProtocolOrderWhenUnset(t *testing.T) {
+	const noProtocolConfig = `
+[host.bare]
+addresses = "bare.example.com"
+`
+	cfg, err := Parse([]byte(noProtocolConfig))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	resolved, err := cfg.Resolve("bare")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !slicesEqual(resolved.Protocols, DefaultProtocolOrder) {
+		t.Errorf("Protocols = %v, want DefaultProtocolOrder %v", resolved.Protocols, DefaultProtocolOrder)
+	}
+}
+
 func TestAliasCollisionErrors(t *testing.T) {
 	const collidingConfig = `
 [host.a]
